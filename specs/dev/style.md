@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2026 SubLang International <https://www.sublang.xyz> -->
+
 # STYLE: Authoring Conventions
 
 This component defines authoring conventions, per [DR-000](../decisions/000-initial-specs-structure.md#dr-000-initial-specs-structure).
@@ -45,3 +48,23 @@ Specs shall not cite iterations.
 ### STYLE-009
 
 Test specs shall not be cited by other specs.
+
+## SPDX Headers
+
+### STYLE-010
+
+Each applicable file shall include SPDX headers in the first comment block (after shebang if present), per [SPDX-001](../test/spdx-headers.md#spdx-001-copyright-header-presence) and [SPDX-002](../test/spdx-headers.md#spdx-002-license-header-presence).
+
+**Markdown** (specs, README, docs):
+
+```markdown
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2026 SubLang International <https://www.sublang.xyz> -->
+```
+
+**TypeScript/JavaScript**:
+
+```typescript
+// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 SubLang International <https://www.sublang.xyz>
+```

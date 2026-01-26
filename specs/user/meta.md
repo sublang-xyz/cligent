@@ -1,3 +1,6 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!-- SPDX-FileCopyrightText: 2026 SubLang International <https://www.sublang.xyz> -->
+
 # META: Specification Format
 
 This component defines how to read specifications using GEARS syntax, per [DR-000](../decisions/000-initial-specs-structure.md#dr-000-initial-specs-structure).
