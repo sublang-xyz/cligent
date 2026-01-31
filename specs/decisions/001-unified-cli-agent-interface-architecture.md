@@ -89,9 +89,38 @@ Official VS Code extensions integrate with their CLI counterparts and share conf
 | **Claude Code** | Shares settings/configuration with the CLI [^4] |
 | **Codex** | Uses the Codex CLI and shares `~/.codex/config.toml` configuration [^5] |
 
-### MCP Role
+## Alternatives Considered
 
-MCP is primarily for **tool connectivity** (agents calling external tools). Codex can run as an MCP server to expose a `codex` tool, but this decision keeps MCP out of the primary orchestration path to avoid inconsistent control surfaces across agents. [^6][^7]
+### CLI Wrapper (Shell Script)
+
+Spawn CLIs directly via shell and parse streaming output (e.g., `--output-format stream-json`).
+
+**Advantages:** No runtime dependencies, process isolation (agent crash doesn't affect coordinator), transparent execution that LLMs can generate/debug, real-time observability via NDJSON streams.
+
+**Disadvantages:** Extra processes for JSON parsing (`jq`/awk), string-based error handling (exit codes + stderr), shell job control for parallelism (`&`/`wait`, traps) less ergonomic than `Promise.all()`/`AbortController`, less unit-testable than typed interfaces.
+
+TypeScript library is preferred because it provides typed events (e.g., Claude Agent SDK's `SDKMessage` [^1]), in-process JSON parsing, and compile-time validation.
+
+### MCP
+
+Treat agents as MCP servers and communicate via JSON-RPC [^9].
+
+**Advantages:** Standardized protocol with SSE streaming and notifications [^9], dynamic tool discovery, built-in permission model [^6][^7].
+
+**Disadvantages:** MCP is designed for tool connectivity (agents calling external tools), not agent invocation. Coordinating parallel agents via MCP requires managing multiple server connections, adding complexity compared to async generators with `Promise.all()`.
+
+MCP doesn't define a standard for token-delta or trace events, so achieving glass-box observability would require additional, non-standard instrumentation.
+
+### Why Not Existing Frameworks
+
+| Framework | Approach | Gap |
+| --------- | -------- | --- |
+| **AWS CLI Agent Orchestrator** [^10] | tmux sessions | Multi-provider (Amazon Q, Claude Code, Codex); tmux-based, not a unified stream schema |
+| **Claude Squad** [^11] | Go TUI, tmux, git worktrees | Multi-agent terminal manager; not an orchestration engine |
+| **Claude Flow** [^12] | Stream-JSON chaining for Claude Code | Supports real-time NDJSON events; focused on Claude Code, not unified multi-CLI |
+| **MCP-Agent** [^13] | Agents as MCP servers | Composable workflows; granular streaming not standardized by MCP |
+
+These solutions address pieces of the problem but none provide a unified, observable, rich-UI-friendly interface across multiple CLI agents.
 
 ## Consequences
 
@@ -112,3 +141,8 @@ MCP is primarily for **tool connectivity** (agents calling external tools). Code
 [^6]: Claude Code MCP: <https://code.claude.com/docs/en/mcp>
 [^7]: Codex Agents SDK Guide (MCP server): <https://developers.openai.com/codex/guides/agents-sdk/>
 [^8]: Claude Agent SDK Overview: <https://platform.claude.com/docs/en/agent-sdk/overview>
+[^9]: MCP Specification: <https://spec.modelcontextprotocol.io/specification/>
+[^10]: AWS CLI Agent Orchestrator: <https://github.com/awslabs/cli-agent-orchestrator>
+[^11]: Claude Squad: <https://github.com/smtg-ai/claude-squad>
+[^12]: Claude Flow: <https://github.com/ruvnet/claude-flow>
+[^13]: MCP-Agent: <https://github.com/lastmile-ai/mcp-agent>
