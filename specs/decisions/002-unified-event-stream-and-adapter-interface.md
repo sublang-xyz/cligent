@@ -58,7 +58,6 @@ interface BaseEvent {
   agent: AgentId;
   timestamp: number;
   sessionId: string;
-  parentToolUseId?: string;
   metadata?: Record<string, unknown>;  // vendor-specific fields
 }
 
@@ -77,13 +76,13 @@ interface InitPayload {
 
 interface ToolUsePayload {
   toolName: string;
-  toolId: string;
+  toolUseId: string;
   input: Record<string, unknown>;
   description?: string;
 }
 
 interface ToolResultPayload {
-  toolId: string;
+  toolUseId: string;
   toolName: string;
   status: 'success' | 'error' | 'denied';
   output: unknown;
@@ -96,7 +95,7 @@ interface DonePayload {
   usage: {
     inputTokens: number;
     outputTokens: number;
-    toolCalls: number;
+    toolUses: number;
     totalCostUsd?: number;
   };
   durationMs: number;
