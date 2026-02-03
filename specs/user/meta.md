@@ -9,7 +9,7 @@ This component defines how to read specifications using GEARS syntax, per [DR-00
 
 ### META-001
 
-Each specification shall use the [GEARS](https://sublang.xyz/ref/gears-ai-ready-spec-syntax) pattern:
+Each specification shall use the [GEARS](https://sublang.ai/ref/gears-ai-ready-spec-syntax) pattern:
 
 ```text
 [Where <static precondition(s)>] [While <stateful precondition(s)>] [When <trigger>] The <subject> shall <behavior>.

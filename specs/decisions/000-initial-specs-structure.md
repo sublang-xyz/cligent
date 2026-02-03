@@ -33,7 +33,7 @@ specs/
 
 ### Specs
 
-Spec files follow [GEARS](https://sublang.xyz/ref/gears-ai-ready-spec-syntax) syntax and can be organized hierarchically. Suggested top-level groups:
+Spec files follow [GEARS](https://sublang.ai/ref/gears-ai-ready-spec-syntax) syntax and can be organized hierarchically. Suggested top-level groups:
 
 | Group | Purpose |
 | ----- | ------- |
