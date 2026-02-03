@@ -106,21 +106,25 @@ Adapters should emit `init` first when possible to establish capabilities.
 
 ### Unified Permission Model (UPM)
 
-Three canonical tiers abstract vendor-specific flags:
+Capability-based primitives map to vendor-specific controls (not always 1:1):
 
-| Tier | Semantics |
-| ---- | --------- |
-| `dry-run` | Read-only, plan/suggest only |
-| `supervised` | Edit files, ask for shell/network |
-| `autonomous` | Full access without prompts |
+| Capability | Description | Claude Code | Codex | Gemini | OpenCode |
+| ---------- | ----------- | ----------- | ----- | ------ | -------- |
+| `fileWrite` | Create/modify files | `permissions.allow/ask/deny` for `Write(...)` [^8] | `sandbox_mode` + `approval_policy` [^9] | `coreTools`/`excludeTools` (edit tools) [^10] | `permission` map for `edit` [^11] |
+| `shellExecute` | Run shell commands | `permissions.allow/ask/deny` for `Bash(...)` [^8] | `sandbox_mode` + `approval_policy` [^9] | `coreTools`/`excludeTools` for `ShellTool` [^10] | `permission` map for `bash` [^11] |
+| `networkAccess` | HTTP requests, external APIs | `permissions.allow/ask/deny` for `WebFetch` [^8] | `sandbox_mode` + `network_access` + `approval_policy` [^9] | `coreTools`/`excludeTools` for web tools [^10] | `permission` map for `webfetch` [^11] |
 
 ```typescript
-type PermissionTier = 'dry-run' | 'supervised' | 'autonomous';
+type PermissionLevel = 'allow' | 'ask' | 'deny';
 
-type PermissionMode = 'default' | 'accept_edits' | 'bypass' | 'plan' | 'ask';
+interface PermissionPolicy {
+  fileWrite?: PermissionLevel;     // default: 'ask'
+  shellExecute?: PermissionLevel;  // default: 'ask'
+  networkAccess?: PermissionLevel; // default: 'ask'
+}
 ```
 
-`PermissionTier` is optional; adapters use their default if omitted. `PermissionMode` is an optional, adapter-specific hint that may be ignored.
+Adapters translate these primitives to vendor-specific controls where supported (e.g., Claude Code `permissions.allow/ask/deny` [^8], Codex `sandbox_mode` + `approval_policy` with optional `network_access` [^9], Gemini `coreTools`/`excludeTools` [^10], OpenCode `permission` map [^11]). Omitted capabilities default to `'ask'`.
 
 ### Adapter Interface
 
@@ -140,24 +144,17 @@ interface AgentAdapter {
 interface AgentOptions {
   cwd?: string;
   model?: string;
-  permissionTier?: PermissionTier;
-  permissionMode?: PermissionMode;
+  permissions?: PermissionPolicy;
   maxTurns?: number;
   maxBudgetUsd?: number;
   resume?: string;
   abortSignal?: AbortSignal;
   allowedTools?: string[];     // whitelist: only these tools can be used
   disallowedTools?: string[];  // blacklist: these tools cannot be used
-  canUseTool?: CanUseTool;
 }
-
-type CanUseTool = (
-  toolName: string,
-  input: Record<string, unknown>
-) => Promise<{ allow: boolean; message?: string }>;
 ```
 
-Tool filtering: if `allowedTools` is set, only listed tools are available; `disallowedTools` further excludes from that set. Adapters should emit `permission_request` when user decision is required. The `canUseTool` callback allows consistent approval UX across agents, but requires SDK-based adapters or interactive mode; CLI-spawn adapters in headless mode may not support it.
+Tool filtering: if `allowedTools` is set, only listed tools are available; `disallowedTools` further excludes from that set. Adapters should emit `permission_request` when user decision is required and handle approvals via adapter-native mechanisms (SDK callbacks, CLI prompts). Headless adapters may not support interactive approvals.
 
 ### Session Control
 
@@ -184,10 +181,10 @@ async function* runParallel(
 ## Consequences
 
 - **Adapters** translate native events to UES; each agent needs one adapter
-- **UPM** provides consistent safety semantics across vendors
+- **UPM** uses capability primitives (`fileWrite`, `shellExecute`, `networkAccess`) mapped by adapters to vendor controls
 - **AbortSignal** standardizes interruption (no custom `interrupt()` method)
 - **Session resumption** via `resume` option; checkpointing is adapter-specific
-- **Permission hooks** via `canUseTool` require SDK-based adapters or interactive mode
+- **Interactive approvals** rely on adapter-native mechanisms; headless adapters may not support them
 - **Tool filtering** via `allowedTools`/`disallowedTools` supported by all agents; implementation varies (CLI flags, permissions config, policy engine)
 - **Budgeting**: `maxTurns` supported by Claude Code, OpenCode (`steps`), Gemini (`maxSessionTurns`); `maxBudgetUsd` only by Claude Code
 - **MCP integration** deferred to adapter implementation [^7]
@@ -202,3 +199,7 @@ async function* runParallel(
 [^5]: Gemini CLI GitHub repository: <https://github.com/google-gemini/gemini-cli>
 [^6]: OpenCode GitHub repository: <https://github.com/anomalyco/opencode>
 [^7]: MCP Specification: <https://modelcontextprotocol.io/specification/2025-11-25>
+[^8]: Claude Code settings (permissions): <https://code.claude.com/docs/en/settings>
+[^9]: Codex security and sandbox/approvals: <https://developers.openai.com/codex/security>
+[^10]: Gemini CLI configuration: <https://geminicli.com/docs/cli/configuration/>
+[^11]: OpenCode permissions: <https://opencode.ai/docs/permissions>
