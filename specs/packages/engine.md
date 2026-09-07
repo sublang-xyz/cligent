@@ -565,6 +565,18 @@ When an adapter identifies a rejected provider session token, it shall report `S
 - diagnostic text and user content never establish the classification;
 - the engine preserves the classification and clears the rejected automatic resume token; neither engine nor adapter retries, and a fresh call remains the caller's decision.
 
+### engine-86
+
+When a caller requests `discoverAgentModels(adapter, options?)`, Cligent shall return the selected runtime's model catalog without sending a prompt, creating or resuming a durable provider conversation, or changing configuration ([DR-023](../decisions/023-provider-model-discovery.md)):
+
+- `options` accepts `cwd`, an environment overlay, an abort signal, and a positive `timeoutMs` (default `10000`); discovery ends on cancellation or deadline and closes its owned SDK query or child process.
+- Success is `{status:'available',models}`; unsupported discovery, unavailable runtime, malformed responses and operational failures return `{status:'unavailable',reason}`, never an invented catalog.
+- Each model has `id` and `name`, with `resolvedModel`, `effortValues`, `defaultEffort` and `fastModeSupported` only when reported or derived through an existing adapter mapping [[engine-42](#engine-42)]; absent effort/fast support means unknown, while `[]` and `false` mean known unsupported.
+- Model effort choices include only levels this adapter transports [[engine-24](#engine-24)]; they remain distinct from adapter-wide acceptance, orchestration capabilities and installed-runtime readiness [[engine-26](#engine-26)] [[engine-76](#engine-76)].
+- Claude uses its resolved Agent SDK's initialization model catalog with empty input and persistence/hooks/tools disabled; Codex uses its SDK-owned executable's `initialize` and paginated `model/list`, without a thread or turn request, deriving fast support only from a reported `additionalSpeedTiers` list containing `fast` (an empty list means false).
+- OpenCode uses `opencode models`; Kimi uses `kimi provider list --json` and returns only model aliases, never provider credentials; Gemini reports discovery unavailable until a non-session listing is supported.
+- The catalog is advisory: absence never rejects a custom model string, establishes account entitlement, substitutes settings, or triggers discovery during ordinary validation or execution.
+
 ## Verification
 
 ### engine-101
@@ -766,3 +778,12 @@ When the adapter/engine integration matrix supplies proven rejection before exec
 - one error terminal event without a token;
 - no automatic retry;
 - unchanged handling of ordinary failures.
+
+### engine-87
+
+When a discovery integration suite supplies provider initialization responses and real fixture child processes, it shall verify model discovery [[engine-86](#engine-86)]:
+
+- exact IDs, aliases, defaults, mapped model effort levels and true/false/unknown fast support;
+- complete paginated Codex results with only initialization and model-list requests;
+- no prompt, durable session, tool, hook or credential disclosure;
+- success, empty catalog, malformed response, unavailable interface, timeout and cancellation, with owned transport cleanup.

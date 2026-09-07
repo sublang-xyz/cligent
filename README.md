@@ -117,6 +117,34 @@ account, provider, and policy, and fast serving may cost more. Use the exported
 `FAST_MODE_SUPPORT` metadata before presenting the option; see the
 [fast-mode guide](docs/guide.md#fast-mode) for request and observation limits.
 
+## Model discovery
+
+Query the installed runtime on demand, without sending a prompt:
+
+```ts
+import { discoverAgentModels } from '@sublang/cligent';
+
+const catalog = await discoverAgentModels('codex', { timeoutMs: 10_000 });
+if (catalog.status === 'available') {
+  for (const model of catalog.models) {
+    console.log(model.id, model.effortValues, model.fastModeSupported);
+  }
+} else {
+  console.log(catalog.reason);
+}
+```
+
+Model metadata comes from the provider: an empty `effortValues` list or
+`fastModeSupported: false` means unsupported; an absent field means unknown.
+`resolvedModel`, when present, names the model behind an alias. Keep custom
+model input available: catalogs may be incomplete and do not guarantee account
+access. `getEffortSupport()` and `getFastModeSupport()` describe what the
+adapter accepts, independently of model support.
+
+Claude, Codex, Kimi and OpenCode expose read-only catalogs; Gemini currently
+returns `unavailable`. Discovery accepts `cwd`, `env` and `signal`, cleans up
+its transport, and defaults to a 10-second deadline.
+
 ## tmux-play
 
 `tmux-play` is a reference application built on `Cligent` — a working

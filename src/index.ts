@@ -99,3 +99,10 @@ export {
   isUnsupportedRuntimeError,
   readCommandVersion,
 } from './runtime-version.js';
+
+export { discoverAgentModels } from './model-discovery.js';
+export type {
+  DiscoveredModel,
+  ModelDiscovery,
+  ModelDiscoveryOptions,
+} from './model-discovery.js';
