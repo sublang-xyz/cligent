@@ -574,6 +574,7 @@ When a caller requests `discoverAgentModels(adapter, options?)`, Cligent shall r
 - Each model has `id` and `name`, with `resolvedModel`, `effortValues`, `defaultEffort` and `fastModeSupported` only when reported or derived through an existing adapter mapping [[engine-42](#engine-42)]; absent effort/fast support means unknown, while `[]` and `false` mean known unsupported.
 - Model effort choices include only levels this adapter transports [[engine-24](#engine-24)]; they remain distinct from adapter-wide acceptance, orchestration capabilities and installed-runtime readiness [[engine-26](#engine-26)] [[engine-76](#engine-76)].
 - Claude uses its resolved Agent SDK's initialization model catalog with empty input and persistence/hooks/tools disabled; Codex uses its SDK-owned executable's `initialize` and paginated `model/list`, without a thread or turn request, deriving fast support only from a reported `additionalSpeedTiers` list containing `fast` (an empty list means false).
+- JavaScript entry points run in Node mode under Node or Electron, with overrides confined to the discovery child’s environment.
 - OpenCode uses `opencode models`; Kimi uses `kimi provider list --json` and returns only model aliases, never provider credentials; Gemini reports discovery unavailable until a non-session listing is supported.
 - The catalog is advisory: absence never rejects a custom model string, establishes account entitlement, substitutes settings, or triggers discovery during ordinary validation or execution.
 
@@ -785,5 +786,6 @@ When a discovery integration suite supplies provider initialization responses an
 
 - exact IDs, aliases, defaults, mapped model effort levels and true/false/unknown fast support;
 - complete paginated Codex results with only initialization and model-list requests;
+- JavaScript child execution under Electron despite a missing or conflicting caller mode flag, with other environment values preserved;
 - no prompt, durable session, tool, hook or credential disclosure;
 - success, empty catalog, malformed response, unavailable interface, timeout and cancellation, with owned transport cleanup.

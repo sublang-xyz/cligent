@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -197,6 +197,63 @@ describe('engine-86: provider model discovery', () => {
         cursor: 'page-two',
       });
     });
+  });
+
+  it.each([undefined, '0'])(
+    'runs a JavaScript entry in Node mode despite caller flag %s',
+    async (flag) => {
+      const original = process.env.ELECTRON_RUN_AS_NODE;
+      await withCommand(
+        `import { writeFileSync } from 'node:fs';
+         writeFileSync(process.env.MODEL_TEST_ENV, JSON.stringify({
+           mode: process.env.ELECTRON_RUN_AS_NODE,
+           kept: process.env.MODEL_TEST_KEEP,
+           cwd: process.cwd(),
+         }));
+` + catalogServer,
+        async (command, dir) => {
+          const envFile = join(dir, 'environment.json');
+          const env = {
+            ELECTRON_RUN_AS_NODE: flag,
+            MODEL_TEST_KEEP: 'caller-value',
+            MODEL_TEST_ENV: envFile,
+            MODEL_TEST_LOG: join(dir, 'requests.jsonl'),
+          };
+          const result = await discoverAgentModelsWithDeps(
+            'codex',
+            { cwd: dir, env },
+            { checkRuntime, command: () => ({ ...command, nodeEntry: true }) },
+          );
+          expect(result.status).toBe('available');
+          expect(JSON.parse(await readFile(envFile, 'utf8'))).toEqual({
+            mode: '1',
+            kept: 'caller-value',
+            cwd: await realpath(dir),
+          });
+          expect(env.ELECTRON_RUN_AS_NODE).toBe(flag);
+          expect(process.env.ELECTRON_RUN_AS_NODE).toBe(original);
+        },
+      );
+    },
+  );
+
+  it('preserves the caller mode flag for native listing commands', async () => {
+    await withCommand(
+      `if (process.env.ELECTRON_RUN_AS_NODE !== '0') process.exit(2);
+       console.log('provider/model');`,
+      async (command) => {
+        expect(
+          await discoverAgentModelsWithDeps(
+            'opencode',
+            { env: { ELECTRON_RUN_AS_NODE: '0' } },
+            { checkRuntime, command: () => command },
+          ),
+        ).toEqual({
+          status: 'available',
+          models: [{ id: 'provider/model', name: 'provider/model' }],
+        });
+      },
+    );
   });
 
   it('preserves an empty catalog as successful discovery', async () => {

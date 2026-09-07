@@ -38,7 +38,7 @@ export interface ModelDiscoveryOptions {
 
 type ModelAdapter = AgentRuntimeName | 'claude-code';
 type Row = Record<string, unknown>;
-type Command = { executable: string; args: string[] };
+type Command = { executable: string; args: string[]; nodeEntry?: boolean };
 interface ClaudeQuery {
   supportedModels?(): Promise<unknown>;
   close(): void;
@@ -184,6 +184,7 @@ async function commandFor(adapter: AgentRuntimeName): Promise<Command> {
     return {
       executable: process.execPath,
       args: [resolveCodexBinPath(), 'app-server'],
+      nodeEntry: true,
     };
   }
   return adapter === 'kimi'
@@ -395,7 +396,12 @@ class DiscoveryProcess {
     checkAbort(options.signal);
     this.child = spawn(command.executable, command.args, {
       cwd: options.cwd,
-      env: { ...process.env, ...options.env },
+      env: {
+        ...process.env,
+        ...options.env,
+        // Electron's process.execPath needs Node mode for the SDK's JS entry.
+        ...(command.nodeEntry ? { ELECTRON_RUN_AS_NODE: '1' } : {}),
+      },
       stdio: ['pipe', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     });
