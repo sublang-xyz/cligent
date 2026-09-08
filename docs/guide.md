@@ -408,8 +408,8 @@ An absent detail is unreported, not zero. When every detail on one side is
 present, those details add up exactly to its total. `coverage: 'complete'`
 means all model requests caused by this invocation, including subagents, are
 represented. `'partial'` means the numbers are exact but the runtime surface
-may omit work. A cost calculator should reject partial coverage unless it is
-deliberately calculating a lower bound.
+may omit work. A calculation on a partial report covers only reported work
+and cannot establish the full run's cost.
 
 ### Which rate card applies
 
@@ -437,7 +437,7 @@ If that identity cannot hold, records are omitted rather than guessed.
 
 `usage.cost` is independent of tokens. Claude Code and OpenCode can report
 client-side cost estimates, which Cligent labels `agent-estimate`; that is not
-an invoice. Cligent never applies its own rate table.
+an invoice. Adapter accounting never fills this field from a Cligent calculation.
 
 ### What each agent reports
 
@@ -477,6 +477,66 @@ missing tokens; a successful turn alone does not prove attributable usage.
 
 The [resume accounting investigation](codex-resume-accounting.md) documents the
 reproduction and the limits of the original dogfooding evidence.
+
+### Optional cost estimates
+
+Use `estimateCost` after a run when an approximate text-token cost is useful.
+It returns a separate result and leaves runtime-reported `usage.cost` unchanged.
+No pricing request happens during adapter execution.
+
+```ts
+import { estimateCost, getDefaultPricingCachePath } from '@sublang/cligent';
+
+// Supply authoritative USD rates per million tokens; this bypasses all I/O.
+const custom = await estimateCost(usage, {
+  prices: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
+});
+
+// Otherwise use models.dev. Codex often omits the effective model/provider,
+// so explicitly supply the assumptions you want to use for the estimate.
+const estimate = await estimateCost(usage, {
+  provider: 'openai',
+  model: 'gpt-5.6-luna',
+});
+
+if (estimate.status === 'estimated') {
+  console.log(estimate.amount, estimate.currency, estimate.coverage);
+  console.log(estimate.source, estimate.records, estimate.assumptions);
+} else {
+  console.log(estimate.reason, estimate.message);
+}
+
+console.log(getDefaultPricingCachePath()); // Delete this file to refresh next time.
+```
+
+Without caller prices, native model/provider records select exact entries from
+[models.dev](https://models.dev). The `model` option fills only missing model
+identity; `provider` explicitly selects the catalog provider for every record,
+including when a native authentication-family name differs. Both choices are
+reported as assumptions. No built-in provider alias or price table is maintained.
+One supplied `prices` card applies uniformly across models while preserving known
+per-record token details.
+
+Catalog prices are cached on disk for 24 hours. A missing or expired cache
+triggers retrieval; deleting it forces retrieval on the next catalog-based call.
+If refresh fails, a valid older snapshot can still be used with `source.stale`
+and its original `fetchedAt`. Without usable prices, the result is `unavailable`.
+You can override `cachePath` and the retrieval `timeoutMs` (default 5,000).
+`getDefaultPricingCachePath()` identifies the platform's Cligent cache file.
+
+Estimates preserve complete or partial token coverage and return the exact rates
+used for reproducibility. Cache and reasoning subsets replace ordinary rates
+without being counted twice. Positive reported cache quantities require their
+own rates; missing cache quantities are priced at ordinary input rates with a
+disclosed assumption. A distinct reasoning price needs a reported reasoning count.
+Context tiers use each record's input only when it represents exactly one request;
+aggregated or unknown request counts use standard prices with an assumption.
+
+These are text-token estimates at the selected rates, not actual charges.
+Catalog calculations assume standard service mode. Subscriptions, tool fees,
+regional rates, fast/priority modes, and other adjustments require caller choices
+or are outside this calculation. Missing tokens or unknown model prices remain
+unavailable; a partial report remains partial.
 
 ## Permissions
 

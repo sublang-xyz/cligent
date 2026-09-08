@@ -101,9 +101,10 @@ runtime distinguishes billing through authentication, an authentication or billi
 
 ### Costs and priced units
 
-Cligent shall not apply a price table.
+Adapter accounting shall not apply a price table or populate runtime cost from a Cligent calculation.
 Prices, context tiers, service modes, cache time-to-live, modalities, regions, subscriptions, and separately
 priced tools change independently of the package.
+An optional caller-invoked estimator is defined separately by [DR-024](024-optional-cost-estimation.md), retaining external rates and explicit estimate provenance.
 
 A runtime-supplied cost is represented as `{ amount, currency: 'USD', source }`, where `source` is one of
 `agent-estimate`, `provider-reported`, or `account-estimate`.

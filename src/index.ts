@@ -106,3 +106,12 @@ export type {
   ModelDiscovery,
   ModelDiscoveryOptions,
 } from './model-discovery.js';
+
+export { estimateCost, getDefaultPricingCachePath } from './cost-estimation.js';
+export type {
+  TokenPrices,
+  CostEstimationOptions,
+  CostEstimationUnavailableReason,
+  CostEstimateRecord,
+  CostEstimateResult,
+} from './cost-estimation.js';
