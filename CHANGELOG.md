@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional `estimateCost` helper with caller-supplied token prices or models.dev
+  pricing cached for 24 hours. Estimates preserve reported coverage, disclose
+  assumptions and applied rates, and remain separate from runtime-reported cost.
+  Deleting the cache refreshes prices; failed refreshes can use an explicitly
+  marked stale snapshot.
+
 ### Fixed
 
 - Invalidate Codex token baselines after runs without native terminal usage,

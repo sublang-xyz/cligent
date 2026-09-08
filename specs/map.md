@@ -49,6 +49,7 @@ meta.md       The spec of specs
 | [DR-021](decisions/021-agent-runtime-fast-mode.md) | 021-agent-runtime-fast-mode.md | Adapter-scoped fast-mode requests and authentic observations |
 | [DR-022](decisions/022-definite-session-rejection.md) | 022-definite-session-rejection.md | Typed pre-execution resume rejection, preserved to hosts without automatic retry |
 | [DR-023](decisions/023-provider-model-discovery.md) | 023-provider-model-discovery.md | On-demand runtime model catalogs, model effort/fast facts and honest unavailable results |
+| [DR-024](decisions/024-optional-cost-estimation.md) | 024-optional-cost-estimation.md | Optional estimates using caller rates or cached external pricing |
 
 ## Packages
 
@@ -56,6 +57,7 @@ meta.md       The spec of specs
 | --- | --- |
 | [claude-code.md](packages/adapters/claude-code.md) | Claude Code SDK adapter |
 | [codex.md](packages/adapters/codex.md) | Codex SDK adapter |
+| [cost-estimation.md](packages/cost-estimation.md) | Optional text-token cost estimation and external pricing cache |
 | [engine.md](packages/engine.md) | Cligent engine and shared adapter contract |
 | [gemini.md](packages/adapters/gemini.md) | Gemini CLI child-process adapter |
 | [git.md](packages/git.md) | Commit workflow and message conventions |

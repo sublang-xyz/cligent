@@ -345,7 +345,7 @@ function writeConsumerFiles() {
     join(consumerDirectory, 'runtime-consumer.mjs'),
     `import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { delimiter, dirname, join } from 'node:path';
+import { delimiter, dirname, isAbsolute, join } from 'node:path';
 
 const expectedVersion = 'v${NODE_RUNTIME_VERSION}';
 if (process.version !== expectedVersion) {
@@ -379,6 +379,8 @@ for (const [label, value] of [
   ['getFastModeSupport', root.getFastModeSupport],
   ['isFastModeSupported', root.isFastModeSupported],
   ['assertFastModeSupported', root.assertFastModeSupported],
+  ['estimateCost', root.estimateCost],
+  ['getDefaultPricingCachePath', root.getDefaultPricingCachePath],
 ]) {
   if (typeof value !== 'function') throw new Error(\`missing public export \${label}\`);
 }
@@ -429,6 +431,63 @@ if (
 }
 root.assertFastModeSupported('codex');
 
+// cost-estimation-15: exercise the installed public API on the Node floor.
+const cachePath = root.getDefaultPricingCachePath();
+if (typeof cachePath !== 'string' || !isAbsolute(cachePath)) {
+  throw new Error('default pricing cache path is not an absolute string');
+}
+const callerCachePath = join(process.cwd(), 'caller-pricing-must-not-write.json');
+const prices = { input: 2, output: 10, cacheRead: 0.5, cacheWrite: 3, reasoning: 20 };
+const costUsage = {
+  toolUses: 2,
+  cost: { amount: 7, currency: 'USD', source: 'provider-reported' },
+  tokens: {
+    coverage: 'partial',
+    totals: {
+      input: { total: 1_000_000, uncached: 500_000, cacheRead: 250_000, cacheWrite: 250_000 },
+      output: { total: 200_000, visible: 100_000, reasoning: 100_000 },
+    },
+  },
+};
+const costUsageBefore = JSON.stringify(costUsage);
+const originalFetch = globalThis.fetch;
+globalThis.fetch = () => { throw new Error('caller prices attempted network access'); };
+try {
+  const estimatePromise = root.estimateCost(costUsage, { prices, cachePath: callerCachePath });
+  if (!(estimatePromise instanceof Promise)) {
+    throw new Error('estimateCost did not return a Promise');
+  }
+  const estimate = await estimatePromise;
+  // 0.5M * $2 + 0.25M * $0.50 + 0.25M * $3 + 0.1M * $10 + 0.1M * $20.
+  if (
+    estimate.status !== 'estimated' ||
+    Math.abs(estimate.amount - 4.875) > 1e-12 ||
+    estimate.coverage !== 'partial' ||
+    estimate.currency !== 'USD' ||
+    estimate.source.type !== 'caller' ||
+    estimate.records.length !== 1 ||
+    Math.abs(estimate.records[0].amount - 4.875) > 1e-12
+  ) {
+    throw new Error('installed estimator did not preserve inclusive subset arithmetic');
+  }
+  const zero = await root.estimateCost({
+    toolUses: 0,
+    tokens: { coverage: 'complete', totals: { input: { total: 0 }, output: { total: 0 } } },
+  }, { prices: { input: 0, output: 0 }, cachePath: callerCachePath });
+  if (zero.status !== 'estimated' || zero.amount !== 0 || zero.coverage !== 'complete') {
+    throw new Error('installed estimator did not preserve authentic zero usage and rates');
+  }
+  const unavailable = await root.estimateCost({ toolUses: 0 }, { prices });
+  if (unavailable.status !== 'unavailable' || unavailable.reason !== 'tokens-unavailable') {
+    throw new Error('installed estimator did not distinguish absent tokens');
+  }
+  if (JSON.stringify(costUsage) !== costUsageBefore || existsSync(callerCachePath)) {
+    throw new Error('caller-price estimation mutated usage or created a pricing cache');
+  }
+} finally {
+  globalThis.fetch = originalFetch;
+}
+
 const installedBin = join(
   nodeModulesRoot,
   '.bin',
@@ -458,7 +517,7 @@ if (help.status !== 0 || !/Usage:\\r?\\n  tmux-play/.test(helpOutput)) {
 }
 
 process.stdout.write(
-  'Node 18.3.0 peer-free imports and installed launcher verified.\\n',
+  'Node 18.3.0 peer-free imports, cost estimation and installed launcher verified.\\n',
 );
 `,
     'utf8',
@@ -473,6 +532,13 @@ process.stdout.write(
   assertFastModeSupported,
   getFastModeSupport,
   isFastModeSupported,
+  estimateCost,
+  getDefaultPricingCachePath,
+  type CostEstimationOptions,
+  type CostEstimationUnavailableReason,
+  type CostEstimateRecord,
+  type CostEstimateResult,
+  type TokenPrices,
   type ClaudeEffort,
   type CodexEffort,
   type DonePayload,
@@ -567,6 +633,50 @@ const invalidInitFastMode: FastModeObservation = {
   // @ts-expect-error Response speed is available only on terminal observations.
   responseSpeed: 'fast',
 };
+
+// cost-estimation-15: public declarations compile on TypeScript 5.4.
+const tokenPrices: TokenPrices = { input: 2, output: 10, cacheRead: 0.5, cacheWrite: 3, reasoning: 20 };
+const pricingCachePath: string = getDefaultPricingCachePath();
+const estimationOptions: CostEstimationOptions = {
+  prices: tokenPrices, model: 'caller-model', provider: 'caller-provider',
+  cachePath: pricingCachePath, timeoutMs: 1000,
+};
+const estimatePromise: Promise<CostEstimateResult> = estimateCost(donePayload.usage, estimationOptions);
+async function checkEstimateTypes(): Promise<void> {
+  const result = await estimatePromise;
+  if (result.status === 'estimated') {
+    const amount: number = result.amount;
+    const currency: 'USD' = result.currency;
+    const coverage: 'complete' | 'partial' = result.coverage;
+    const records: CostEstimateRecord[] = result.records;
+    const assumptions: string[] = result.assumptions;
+    const estimatedAt: string = result.estimatedAt;
+    if (result.source.type === 'models.dev') {
+      const stale: boolean = result.source.stale;
+      const fetchedAt: string = result.source.fetchedAt;
+      void stale; void fetchedAt;
+    } else {
+      const callerSource: 'caller' = result.source.type;
+      void callerSource;
+    }
+    // @ts-expect-error An estimate has no unavailability reason.
+    result.reason;
+    void amount; void currency; void coverage; void records; void assumptions; void estimatedAt;
+  } else {
+    const reason: CostEstimationUnavailableReason = result.reason;
+    const message: string = result.message;
+    // @ts-expect-error An unavailable result has no estimated amount.
+    result.amount;
+    void reason; void message;
+  }
+}
+// @ts-expect-error Required output price must not disappear from the rate card.
+const incompletePrices: TokenPrices = { input: 2 };
+// @ts-expect-error A token rate is numeric, not a numeric string.
+const stringPrices: TokenPrices = { input: '2', output: 10 };
+void checkEstimateTypes;
+void incompletePrices;
+void stringPrices;
 
 const players: PlayerConfig[] = [
   { id: 'claude', adapter: 'claude', effort: 'ultracode', fastMode: true },
