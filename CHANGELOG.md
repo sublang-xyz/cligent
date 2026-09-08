@@ -10,19 +10,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-09-08
+
 ### Added
 
 - On-demand `discoverAgentModels` catalogs from Claude, Codex, Kimi and
   OpenCode, with provider-reported model effort and fast-mode support.
-  Unavailable discovery and unknown capabilities remain explicit; custom
-  model IDs stay valid.
-
-### Fixed
-
-- Codex model discovery now runs correctly inside Electron without changing
-  the host environment. Discovery cleanup is bounded even when a descendant
-  keeps its launcher's pipes open.
-
+  Unknown capabilities and unavailable discovery remain explicit; custom
+  model IDs stay valid. Discovery supports Electron and bounds subprocess
+  cleanup while preserving completed results and original failures.
 
 ## [0.25.0] - 2026-09-05
 
@@ -481,7 +477,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI workflow (Node 18/20/22) and tag-triggered release workflow
 - npm publish with OIDC trusted publishing and provenance attestation
 
-[Unreleased]: https://github.com/sublang-ai/cligent/compare/v0.25.0...HEAD
+[Unreleased]: https://github.com/sublang-ai/cligent/compare/v0.26.0...HEAD
+[0.26.0]: https://github.com/sublang-ai/cligent/compare/v0.25.0...v0.26.0
 [0.25.0]: https://github.com/sublang-ai/cligent/compare/v0.24.0...v0.25.0
 [0.24.0]: https://github.com/sublang-ai/cligent/compare/v0.23.0...v0.24.0
 [0.23.0]: https://github.com/sublang-ai/cligent/compare/v0.22.0...v0.23.0

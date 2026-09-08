@@ -1,6 +1,6 @@
 {
   "name": "@sublang/cligent",
-  "version": "0.25.0",
+  "version": "0.26.0",
   "description": "Unified TypeScript SDK for AI coding agent CLIs (Claude Code, Codex CLI, Gemini CLI, Kimi Code, OpenCode, and more)",
   "type": "module",
   "license": "Apache-2.0",
