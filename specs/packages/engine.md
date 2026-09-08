@@ -570,6 +570,7 @@ When an adapter identifies a rejected provider session token, it shall report `S
 When a caller requests `discoverAgentModels(adapter, options?)`, Cligent shall return the selected runtime's model catalog without sending a prompt, creating or resuming a durable provider conversation, or changing configuration ([DR-023](../decisions/023-provider-model-discovery.md)):
 
 - `options` accepts `cwd`, an environment overlay, an abort signal, and a positive `timeoutMs` (default `10000`); discovery ends on cancellation or deadline and closes its owned SDK query or child process; after discovery settles, child cleanup allows at most 500 ms for termination before closing inherited pipes, without discarding an obtained catalog or replacing its failure.
+- A catalog is obtained after complete valid protocol replies, or successful CLI exit and stream closure; printed output alone does not settle a CLI listing.
 - Success is `{status:'available',models}` in provider order, retaining only the first row for each exact `id`; unsupported discovery, unavailable runtime, malformed responses and operational failures return `{status:'unavailable',reason}`, never an invented catalog.
 - Each model has `id` and `name`, with `resolvedModel`, `effortValues`, `defaultEffort` and `fastModeSupported` only when reported or derived through an existing adapter mapping [[engine-42](#engine-42)]; absent effort/fast support means unknown, while `[]` and `false` mean known unsupported.
 - Available catalogs may expose `unreportedEffortValues`: adapter choices the discovery interface cannot describe, not guarantees of model eligibility; Claude reports its orchestration values [[engine-47](#engine-47)] here, and other adapters omit the field.
@@ -789,4 +790,4 @@ When a discovery integration suite supplies provider initialization responses an
 - native CLI command arguments and peer-runtime checks through the public entry point, plus complete paginated Codex results with only initialization and model-list requests;
 - JavaScript child execution under Electron despite a missing or conflicting caller mode flag, with other environment values preserved;
 - no prompt, durable session, tool, hook or credential disclosure;
-- success, empty catalog, malformed response, unavailable interface, timeout and cancellation, preserving the settled discovery outcome through bounded cleanup even when a descendant retains inherited pipes.
+- success, empty catalog, malformed response, unavailable interface, timeout and cancellation: bounded cleanup preserves completed protocol results and earlier failures, while CLI listings await stream closure and remain subject to cancellation or timeout.
