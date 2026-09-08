@@ -1,10 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
-import { mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  chmod,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  writeFile,
+} from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as codexAdapter from '../adapters/codex.js';
+import * as runtimeVersion from '../runtime-version.js';
+import { AGENT_RUNTIME_TARGETS } from '../runtime-targets.js';
 import { discoverAgentModels } from '../index.js';
 import { discoverAgentModelsWithDeps } from '../model-discovery.js';
 
@@ -256,6 +266,119 @@ describe('engine-86: provider model discovery', () => {
     );
   });
 
+  it.skipIf(process.platform === 'win32').each(['kimi', 'opencode'] as const)(
+    'uses the public %s command from the caller PATH',
+    async (adapter) => {
+      await withCommand('', async (_command, dir) => {
+        const executable = join(dir, adapter);
+        const log = join(dir, 'native.json');
+        await writeFile(
+          executable,
+          `#!${process.execPath}
+const fs = require('node:fs');
+fs.writeFileSync(process.env.MODEL_TEST_LOG, JSON.stringify(process.argv.slice(2)));
+console.log(${JSON.stringify(adapter === 'kimi' ? JSON.stringify({ models: { alias: { model: 'wire' } } }) : 'provider/model')});
+`,
+        );
+        await chmod(executable, 0o700);
+        const result = await discoverAgentModels(adapter, {
+          cwd: dir,
+          env: { PATH: dir, MODEL_TEST_LOG: log },
+        });
+        expect(result).toEqual({
+          status: 'available',
+          models: [
+            adapter === 'kimi'
+              ? { id: 'alias', name: 'alias' }
+              : { id: 'provider/model', name: 'provider/model' },
+          ],
+        });
+        expect(JSON.parse(await readFile(log, 'utf8'))).toEqual(
+          adapter === 'kimi' ? ['provider', 'list', '--json'] : ['models'],
+        );
+      });
+    },
+  );
+
+  it('checks the Codex runtime and launches its resolved entry through the public API', async () => {
+    await withCommand(
+      `if (JSON.stringify(process.argv.slice(2)) !== '["app-server"]') throw new Error('wrong Codex command');
+` + catalogServer,
+      async (command, dir) => {
+        const gate = vi.spyOn(runtimeVersion, 'assertRuntimeSupported');
+        const binary = vi
+          .spyOn(codexAdapter, 'resolveCodexBinPath')
+          .mockReturnValue(command.args[0]!);
+        try {
+          const result = await discoverAgentModels('codex', {
+            env: { MODEL_TEST_LOG: join(dir, 'requests') },
+          });
+          expect(result.status).toBe('available');
+          const target = AGENT_RUNTIME_TARGETS.codex[0]!;
+          expect(gate).toHaveBeenCalledExactlyOnceWith(
+            target,
+            `npm install ${target.repairSpec}`,
+          );
+          expect(binary).toHaveBeenCalledOnce();
+        } finally {
+          gate.mockRestore();
+          binary.mockRestore();
+        }
+      },
+    );
+  });
+
+  it('retains the first row for each exact model ID in provider order', async () => {
+    expect(
+      await discoverAgentModelsWithDeps(
+        'claude',
+        {},
+        {
+          checkRuntime,
+          claudeQuery: () => ({
+            supportedModels: async () => [
+              { value: 'model', displayName: 'First', supportsFastMode: true },
+              { value: 'MODEL', displayName: 'Distinct' },
+              {
+                value: 'model',
+                displayName: 'Duplicate',
+                supportsFastMode: false,
+              },
+            ],
+            close() {},
+          }),
+        },
+      ),
+    ).toEqual({
+      status: 'available',
+      models: [
+        { id: 'model', name: 'First', fastModeSupported: true },
+        { id: 'MODEL', name: 'Distinct' },
+      ],
+    });
+  });
+
+  it('checks the Claude runtime before opening its catalog query', async () => {
+    const gate = vi.spyOn(runtimeVersion, 'assertRuntimeSupported');
+    try {
+      const result = await discoverAgentModelsWithDeps(
+        'claude',
+        {},
+        {
+          claudeQuery: () => ({ supportedModels: async () => [], close() {} }),
+        },
+      );
+      expect(result).toEqual({ status: 'available', models: [] });
+      const target = AGENT_RUNTIME_TARGETS.claude[0]!;
+      expect(gate).toHaveBeenCalledExactlyOnceWith(
+        target,
+        `npm install ${target.repairSpec}`,
+      );
+    } finally {
+      gate.mockRestore();
+    }
+  });
+
   it('preserves an empty catalog as successful discovery', async () => {
     await withCommand(
       catalogServer.replace(
@@ -334,6 +457,81 @@ describe('engine-86: provider model discovery', () => {
       },
     );
   });
+
+  it.each(['codex', 'opencode', 'completed codex'] as const)(
+    'settles %s discovery when a descendant retains the output pipes',
+    async (kind) => {
+      const source = `
+import { spawn } from 'node:child_process';
+import { writeFileSync } from 'node:fs';
+const descendant = spawn(process.execPath, ['-e', 'process.send(process.pid); setInterval(() => {}, 1000);'], {
+  detached: true, stdio: ['ignore', process.stdout, process.stderr, 'ipc'],
+});
+await new Promise(resolve => descendant.once('message', pid => {
+  writeFileSync(process.env.MODEL_TEST_PID, String(pid)); resolve();
+}));
+${kind === 'completed codex' ? catalogServer : 'process.exit(0);'}
+`;
+      await withCommand(source, async (command, dir) => {
+        const controller = new AbortController();
+        const pidFile = join(dir, 'descendant.pid');
+        let pid: number | undefined;
+        let guard: ReturnType<typeof setTimeout> | undefined;
+        const result = discoverAgentModelsWithDeps(
+          kind === 'opencode' ? 'opencode' : 'codex',
+          {
+            signal: controller.signal,
+            timeoutMs: 3000,
+            env: {
+              MODEL_TEST_PID: pidFile,
+              MODEL_TEST_LOG: join(dir, 'requests'),
+            },
+          },
+          { checkRuntime, command: () => command },
+        );
+        try {
+          await expect
+            .poll(async () => {
+              try {
+                pid = Number(await readFile(pidFile, 'utf8'));
+                return true;
+              } catch {
+                return false;
+              }
+            })
+            .toBe(true);
+          if (kind !== 'completed codex') controller.abort();
+          const bounded = new Promise<never>((_resolve, reject) => {
+            guard = setTimeout(
+              () => reject(new Error('discovery did not settle')),
+              2000,
+            );
+          });
+          expect(await Promise.race([result, bounded])).toEqual({
+            status: 'unavailable',
+            reason:
+              kind === 'completed codex'
+                ? 'Model listing cleanup timed out.'
+                : 'Model discovery cancelled.',
+          });
+        } finally {
+          clearTimeout(guard);
+          controller.abort();
+          if (pid !== undefined) {
+            try {
+              process.kill(
+                process.platform === 'win32' ? pid : -pid,
+                'SIGKILL',
+              );
+            } catch {
+              /* Fixture descendant already exited. */
+            }
+          }
+          await result;
+        }
+      });
+    },
+  );
 
   it('does not start discovery for an already cancelled request', async () => {
     const controller = new AbortController();

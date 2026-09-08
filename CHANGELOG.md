@@ -10,6 +10,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- On-demand `discoverAgentModels` catalogs from Claude, Codex, Kimi and
+  OpenCode, with provider-reported model effort and fast-mode support.
+  Unavailable discovery and unknown capabilities remain explicit; custom
+  model IDs stay valid.
+
+### Fixed
+
+- Codex model discovery now runs correctly inside Electron without changing
+  the host environment. Discovery cleanup is bounded even when a descendant
+  keeps its launcher's pipes open.
+
+
 ## [0.25.0] - 2026-09-05
 
 ### Added

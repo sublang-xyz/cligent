@@ -376,6 +376,7 @@ function opencodeModels(output: string): DiscoveredModel[] {
 class DiscoveryProcess {
   private child: ChildProcessWithoutNullStreams;
   private finished: Promise<void>;
+  private finish!: () => void;
   private failure: Error | undefined;
   private stdout = '';
   private buffered = '';
@@ -387,6 +388,8 @@ class DiscoveryProcess {
   >();
   private abort: () => void;
   private killTimer: ReturnType<typeof setTimeout> | undefined;
+  private cleanupTimer: ReturnType<typeof setTimeout> | undefined;
+  private cleanupFailure: Error | undefined;
   private exited = false;
 
   constructor(
@@ -406,6 +409,7 @@ class DiscoveryProcess {
       detached: process.platform !== 'win32',
     });
     this.finished = new Promise((resolve) => {
+      this.finish = resolve;
       this.child.on('error', (error) => {
         this.fail(error);
       });
@@ -513,11 +517,25 @@ class DiscoveryProcess {
     this.child.stdin.end();
     this.signal('SIGTERM');
     this.killTimer = setTimeout(() => this.signal('SIGKILL'), 250);
+    // A descendant can keep inherited pipes open after its launcher exits.
+    // Bound both close() and output(), which await this same transport lifetime.
+    this.cleanupTimer = setTimeout(() => {
+      this.cleanupFailure = new Error('Model listing cleanup timed out.');
+      this.failure ??= this.cleanupFailure;
+      this.rejectPending(this.failure);
+      this.child.stdin.destroy();
+      this.child.stdout.destroy();
+      this.child.stderr.destroy();
+      this.child.unref();
+      this.finish();
+    }, 500);
   }
   async close(): Promise<void> {
     this.stop();
     await this.finished;
     clearTimeout(this.killTimer);
+    clearTimeout(this.cleanupTimer);
     this.options.signal.removeEventListener('abort', this.abort);
+    if (this.cleanupFailure) throw this.cleanupFailure;
   }
 }
