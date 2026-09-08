@@ -25,6 +25,8 @@ export type ModelDiscovery =
   | {
       readonly status: 'available';
       readonly models: readonly DiscoveredModel[];
+      /** Adapter choices this catalog cannot describe; not model eligibility. */
+      readonly unreportedEffortValues?: readonly string[];
     }
   | { readonly status: 'unavailable'; readonly reason: string };
 
@@ -32,7 +34,7 @@ export interface ModelDiscoveryOptions {
   readonly cwd?: string;
   readonly env?: Readonly<Record<string, string | undefined>>;
   readonly signal?: AbortSignal;
-  /** Whole discovery deadline, default 10 seconds. */
+  /** Discovery deadline, default 10 seconds, excluding bounded cleanup. */
   readonly timeoutMs?: number;
 }
 
@@ -107,11 +109,24 @@ export async function discoverAgentModelsWithDeps(
             adapter === 'kimi' ? kimiModels(output) : opencodeModels(output);
         }
       } finally {
+        // Discovery owns its answer; teardown cannot turn it into a timeout
+        // or replace it when the caller cancels after the work has settled.
+        clearTimeout(timer);
+        options.signal?.removeEventListener('abort', abort);
         await process.close();
       }
     }
     checkAbort(controller.signal);
-    return { status: 'available', models: uniqueModels(models) };
+    return {
+      status: 'available',
+      models: uniqueModels(models),
+      ...(adapter === 'claude'
+        ? {
+            unreportedEffortValues:
+              getEffortSupport(adapter)!.orchestrationValues,
+          }
+        : {}),
+    };
   } catch (error) {
     const cause = controller.signal.aborted ? controller.signal.reason : error;
     return unavailable(
@@ -389,7 +404,6 @@ class DiscoveryProcess {
   private abort: () => void;
   private killTimer: ReturnType<typeof setTimeout> | undefined;
   private cleanupTimer: ReturnType<typeof setTimeout> | undefined;
-  private cleanupFailure: Error | undefined;
   private exited = false;
 
   constructor(
@@ -520,8 +534,7 @@ class DiscoveryProcess {
     // A descendant can keep inherited pipes open after its launcher exits.
     // Bound both close() and output(), which await this same transport lifetime.
     this.cleanupTimer = setTimeout(() => {
-      this.cleanupFailure = new Error('Model listing cleanup timed out.');
-      this.failure ??= this.cleanupFailure;
+      this.failure ??= new Error('Model listing cleanup timed out.');
       this.rejectPending(this.failure);
       this.child.stdin.destroy();
       this.child.stdout.destroy();
@@ -536,6 +549,5 @@ class DiscoveryProcess {
     clearTimeout(this.killTimer);
     clearTimeout(this.cleanupTimer);
     this.options.signal.removeEventListener('abort', this.abort);
-    if (this.cleanupFailure) throw this.cleanupFailure;
   }
 }

@@ -569,9 +569,10 @@ When an adapter identifies a rejected provider session token, it shall report `S
 
 When a caller requests `discoverAgentModels(adapter, options?)`, Cligent shall return the selected runtime's model catalog without sending a prompt, creating or resuming a durable provider conversation, or changing configuration ([DR-023](../decisions/023-provider-model-discovery.md)):
 
-- `options` accepts `cwd`, an environment overlay, an abort signal, and a positive `timeoutMs` (default `10000`); discovery ends on cancellation or deadline and closes its owned SDK query or child process; child cleanup allows at most 500 ms for termination before closing inherited pipes and reporting failure.
+- `options` accepts `cwd`, an environment overlay, an abort signal, and a positive `timeoutMs` (default `10000`); discovery ends on cancellation or deadline and closes its owned SDK query or child process; after discovery settles, child cleanup allows at most 500 ms for termination before closing inherited pipes, without discarding an obtained catalog or replacing its failure.
 - Success is `{status:'available',models}` in provider order, retaining only the first row for each exact `id`; unsupported discovery, unavailable runtime, malformed responses and operational failures return `{status:'unavailable',reason}`, never an invented catalog.
 - Each model has `id` and `name`, with `resolvedModel`, `effortValues`, `defaultEffort` and `fastModeSupported` only when reported or derived through an existing adapter mapping [[engine-42](#engine-42)]; absent effort/fast support means unknown, while `[]` and `false` mean known unsupported.
+- Available catalogs may expose `unreportedEffortValues`: adapter choices the discovery interface cannot describe, not guarantees of model eligibility; Claude reports its orchestration values [[engine-47](#engine-47)] here, and other adapters omit the field.
 - Model effort choices include only levels this adapter transports [[engine-24](#engine-24)]; they remain distinct from adapter-wide acceptance, orchestration capabilities and installed-runtime readiness [[engine-26](#engine-26)] [[engine-76](#engine-76)].
 - Claude uses its resolved Agent SDK's initialization model catalog with empty input and persistence/hooks/tools disabled; Codex uses its SDK-owned executable's `initialize` and paginated `model/list`, without a thread or turn request, deriving fast support only from a reported `additionalSpeedTiers` list containing `fast` (an empty list means false).
 - JavaScript entry points run in Node mode under Node or Electron, with overrides confined to the discovery child’s environment.
@@ -784,8 +785,8 @@ When the adapter/engine integration matrix supplies proven rejection before exec
 
 When a discovery integration suite supplies provider initialization responses and real fixture child processes, it shall verify model discovery [[engine-86](#engine-86)]:
 
-- exact IDs, aliases, defaults, mapped model effort levels and true/false/unknown fast support;
+- exact IDs, aliases, defaults, mapped model effort levels and true/false/unknown fast support, with Claude’s unreported orchestration choices separate from model facts and absent on other catalogs;
 - native CLI command arguments and peer-runtime checks through the public entry point, plus complete paginated Codex results with only initialization and model-list requests;
 - JavaScript child execution under Electron despite a missing or conflicting caller mode flag, with other environment values preserved;
 - no prompt, durable session, tool, hook or credential disclosure;
-- success, empty catalog, malformed response, unavailable interface, timeout and cancellation, with bounded cleanup even when a descendant retains inherited pipes.
+- success, empty catalog, malformed response, unavailable interface, timeout and cancellation, preserving the settled discovery outcome through bounded cleanup even when a descendant retains inherited pipes.

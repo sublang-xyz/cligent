@@ -100,6 +100,7 @@ describe('engine-86: provider model discovery', () => {
     );
     expect(result).toEqual({
       status: 'available',
+      unreportedEffortValues: ['ultracode'],
       models: [
         {
           id: 'alias',
@@ -351,6 +352,7 @@ console.log(${JSON.stringify(adapter === 'kimi' ? JSON.stringify({ models: { ali
       ),
     ).toEqual({
       status: 'available',
+      unreportedEffortValues: ['ultracode'],
       models: [
         { id: 'model', name: 'First', fastModeSupported: true },
         { id: 'MODEL', name: 'Distinct' },
@@ -368,7 +370,11 @@ console.log(${JSON.stringify(adapter === 'kimi' ? JSON.stringify({ models: { ali
           claudeQuery: () => ({ supportedModels: async () => [], close() {} }),
         },
       );
-      expect(result).toEqual({ status: 'available', models: [] });
+      expect(result).toEqual({
+        status: 'available',
+        models: [],
+        unreportedEffortValues: ['ultracode'],
+      });
       const target = AGENT_RUNTIME_TARGETS.claude[0]!;
       expect(gate).toHaveBeenCalledExactlyOnceWith(
         target,
@@ -458,9 +464,32 @@ console.log(${JSON.stringify(adapter === 'kimi' ? JSON.stringify({ models: { ali
     );
   });
 
-  it.each(['codex', 'opencode', 'completed codex'] as const)(
+  it.each([
+    'codex',
+    'opencode',
+    'completed codex',
+    'malformed codex',
+    'invalid catalog',
+    'refused codex',
+    'cancelled cleanup',
+  ] as const)(
     'settles %s discovery when a descendant retains the output pipes',
     async (kind) => {
+      const completed =
+        kind === 'completed codex' || kind === 'cancelled cleanup';
+      const cancelled = kind === 'codex' || kind === 'opencode';
+      const response = completed
+        ? catalogServer
+        : kind === 'malformed codex'
+          ? "process.stdout.write('not json\\n');"
+          : kind === 'invalid catalog'
+            ? catalogServer.replace(
+                'const result = message.params.cursor',
+                'const result = true ? { data: 7 } : message.params.cursor',
+              )
+            : kind === 'refused codex'
+              ? "process.stdout.write(JSON.stringify({id:1,error:{message:'provider refusal'}})+'\\n');"
+              : 'process.exit(0);';
       const source = `
 import { spawn } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -470,7 +499,11 @@ const descendant = spawn(process.execPath, ['-e', 'process.send(process.pid); se
 await new Promise(resolve => descendant.once('message', pid => {
   writeFileSync(process.env.MODEL_TEST_PID, String(pid)); resolve();
 }));
-${kind === 'completed codex' ? catalogServer : 'process.exit(0);'}
+process.on('SIGTERM', () => {
+  writeFileSync(process.env.MODEL_TEST_CLOSING, 'closing');
+  process.exit(0);
+});
+${response}
 `;
       await withCommand(source, async (command, dir) => {
         const controller = new AbortController();
@@ -485,6 +518,7 @@ ${kind === 'completed codex' ? catalogServer : 'process.exit(0);'}
             env: {
               MODEL_TEST_PID: pidFile,
               MODEL_TEST_LOG: join(dir, 'requests'),
+              MODEL_TEST_CLOSING: join(dir, 'closing'),
             },
           },
           { checkRuntime, command: () => command },
@@ -500,20 +534,48 @@ ${kind === 'completed codex' ? catalogServer : 'process.exit(0);'}
               }
             })
             .toBe(true);
-          if (kind !== 'completed codex') controller.abort();
+          if (cancelled) controller.abort();
+          if (kind === 'cancelled cleanup') {
+            // SIGTERM is sent only after the complete catalog is consumed.
+            await expect
+              .poll(async () => {
+                try {
+                  return await readFile(join(dir, 'closing'), 'utf8');
+                } catch {
+                  return '';
+                }
+              })
+              .toBe('closing');
+            controller.abort();
+          }
           const bounded = new Promise<never>((_resolve, reject) => {
             guard = setTimeout(
               () => reject(new Error('discovery did not settle')),
               2000,
             );
           });
-          expect(await Promise.race([result, bounded])).toEqual({
-            status: 'unavailable',
-            reason:
-              kind === 'completed codex'
-                ? 'Model listing cleanup timed out.'
-                : 'Model discovery cancelled.',
-          });
+          const actual = await Promise.race([result, bounded]);
+          if (completed) {
+            expect(actual.status).toBe('available');
+            if (actual.status === 'available') {
+              expect(actual.models.map(({ id }) => id)).toEqual([
+                'model-one',
+                'model-two',
+                'model-unknown',
+              ]);
+            }
+          } else {
+            expect(actual).toEqual({
+              status: 'unavailable',
+              reason: cancelled
+                ? 'Model discovery cancelled.'
+                : kind === 'malformed codex'
+                  ? 'Malformed Codex model response.'
+                  : kind === 'invalid catalog'
+                    ? 'Malformed model catalog.'
+                    : 'The installed Codex runtime refused model discovery.',
+            });
+          }
         } finally {
           clearTimeout(guard);
           controller.abort();

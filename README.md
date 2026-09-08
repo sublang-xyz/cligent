@@ -140,6 +140,8 @@ Model metadata comes from the provider: an empty `effortValues` list or
 model input available: catalogs may be incomplete and do not guarantee account
 access. `getEffortSupport()` and `getFastModeSupport()` describe what the
 adapter accepts, independently of model support.
+Catalog `unreportedEffortValues` lists adapter choices its discovery interface
+cannot describe; these are not claims of support by every model.
 
 Claude, Codex, Kimi and OpenCode expose read-only catalogs; Gemini currently
 returns `unavailable`. Discovery accepts `cwd`, `env` and `signal`, cleans up
