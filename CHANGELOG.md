@@ -10,6 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Invalidate Codex token baselines after runs without native terminal usage,
+  preventing interrupted work from being attributed to a later resumed turn.
+  Native completion diagnostics explain omitted accounting, and real SDK
+  verification reconciles fresh and resumed turns with cumulative counters.
+
 ## [0.26.0] - 2026-09-08
 
 ### Added

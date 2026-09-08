@@ -1,0 +1,38 @@
+{
+  "provenance": {
+    "sdkVersion": "0.151.0",
+    "cliVersion": "0.151.0",
+    "model": "gpt-5.6-luna",
+    "date": "2026-09-08",
+    "scenario": "Fresh successful turn, two separate shell requests interrupted during the second command, then successful resume. Native exec omits a terminal snapshot on interruption; the persisted rollout proves the first completed model request incurred usage."
+  },
+  "threadId": "01a081da-92d9-72c0-9f85-56d577d30b01",
+  "fresh": {
+    "input_tokens": 11026,
+    "cached_input_tokens": 0,
+    "cache_write_input_tokens": 11023,
+    "output_tokens": 5,
+    "reasoning_output_tokens": 0
+  },
+  "interruptedPersisted": {
+    "input_tokens": 22114,
+    "cached_input_tokens": 11023,
+    "cache_write_input_tokens": 11085,
+    "output_tokens": 120,
+    "reasoning_output_tokens": 16
+  },
+  "resumed": {
+    "input_tokens": 33450,
+    "cached_input_tokens": 22247,
+    "cache_write_input_tokens": 11194,
+    "output_tokens": 125,
+    "reasoning_output_tokens": 16
+  },
+  "resumedLastRequest": {
+    "input_tokens": 11336,
+    "cached_input_tokens": 11224,
+    "cache_write_input_tokens": 109,
+    "output_tokens": 5,
+    "reasoning_output_tokens": 0
+  }
+}
