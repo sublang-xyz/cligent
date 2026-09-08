@@ -454,6 +454,30 @@ the model, request tier, cache details, and service-specific modifiers are all
 known. Tool fees, cache storage time, subscriptions, account credits, regions,
 modalities, and rate changes can still prevent an exact invoice calculation.
 
+### Codex resume accounting diagnostics
+
+Codex's exec stream reports cumulative root-thread counters. Cligent retains
+the previous snapshot on the adapter and subtracts it to report one invocation.
+A new adapter resuming an existing thread has no such baseline: its first
+valid native usage snapshot omits tokens and establishes a baseline for the next turn.
+
+If a run ends without native terminal usage (for example, after an interrupt),
+Cligent discards the old baseline. The next valid resumed snapshot also omits tokens
+and establishes a new baseline. This prevents unobserved work from the interrupted
+run being charged to a later invocation. Tool counts remain independently available.
+
+Each native completion or failure emits `codex:usage` before `done`. Its payload
+contains `status`, an exact `reason`, `resumed`, the known `threadId`, and available
+numerically valid `snapshot`, `baseline`, and `delta` counters. Reasons include missing or
+invalid usage, missing baseline, changed counter shape, decreased counters, and
+invalid token subsets. These diagnostics preserve absent optional counters and
+exclude raw provider payloads. A diagnostic delta can fail subset validation;
+only `status: 'reported'` confirms a valid token report. Capture diagnostics alongside `done` when investigating
+missing tokens; a successful turn alone does not prove attributable usage.
+
+The [resume accounting investigation](codex-resume-accounting.md) documents the
+reproduction and the limits of the original dogfooding evidence.
+
 ## Permissions
 
 > Assumes imports from [Quick start](#quick-start).
@@ -658,5 +682,6 @@ for await (const event of agent.run('Fix the login bug', {
 | `tool_result`                  | `toolUseId`, `status`, `output`                                                      | Tool outcome                                                             |
 | `permission_request`           | `toolName`, `toolUseId`, `input`                                                     | Agent asks for permission                                                |
 | `opencode:permission_decision` | `requestId`, `permission`, `patterns`, `toolUseId`, `decision`, `automated`, `input` | Successful OpenCode auto approval audit                                  |
+| `codex:usage`                  | `status`, `reason`, `resumed`, `threadId?`, `snapshot?`, `baseline?`, `delta?` | Native terminal token-accounting decision |
 | `error`                        | `code`, `message`, `recoverable`                                                     | Error                                                                    |
 | `done`                         | `status`, `resumeToken?`, `usage`, `durationMs`, `fastMode?`                         | Terminal event — always last; Claude may report state and response speed |

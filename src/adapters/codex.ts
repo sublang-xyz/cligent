@@ -437,6 +437,36 @@ interface CodexUsageReading {
   present: Set<keyof CodexUsageSnapshot>;
 }
 
+type CodexUsageCounters = Pick<
+  CodexUsageSnapshot,
+  'inputTokens' | 'outputTokens'
+> &
+  Partial<CodexUsageSnapshot>;
+
+type CodexUsageReason =
+  | 'reported'
+  | 'missing-usage'
+  | 'invalid-usage'
+  | 'missing-baseline'
+  | 'counter-shape-changed'
+  | 'counter-decreased'
+  | 'invalid-token-subsets';
+
+interface CodexUsageDiagnostic {
+  status: 'reported' | 'omitted';
+  reason: CodexUsageReason;
+  resumed: boolean;
+  threadId?: string;
+  snapshot?: CodexUsageCounters;
+  baseline?: CodexUsageCounters;
+  delta?: CodexUsageCounters;
+}
+
+interface CodexTurnUsage {
+  usage: DonePayload['usage'];
+  diagnostic: CodexUsageDiagnostic;
+}
+
 const CODEX_USAGE_ALIASES: ReadonlyArray<
   readonly [keyof CodexUsageSnapshot, readonly string[], boolean]
 > = [
@@ -485,6 +515,19 @@ function readCodexUsageSnapshot(
   return { values, present };
 }
 
+// Diagnostics only expose validated counters that the runtime actually sent.
+// Copy them so a consumer cannot mutate the retained baseline through an event.
+function codexUsageCounters(reading: CodexUsageReading): CodexUsageCounters {
+  const counters: CodexUsageCounters = {
+    inputTokens: reading.values.inputTokens,
+    outputTokens: reading.values.outputTokens,
+  };
+  for (const field of reading.present) {
+    counters[field] = reading.values[field];
+  }
+  return counters;
+}
+
 function hasMatchingOptionalUsageShape(
   current: CodexUsageReading,
   baseline: CodexUsageReading,
@@ -497,9 +540,9 @@ function hasMatchingOptionalUsageShape(
 
 /**
  * codex-15: subtract the previous cumulative snapshot to obtain this turn's
- * usage. A snapshot that decreased means the thread's accounting restarted
- * (compaction or a context-window refill), which cannot be attributed to one
- * turn, so the caller fails closed rather than reporting a guess.
+ * usage. Decreased counters break the cumulative boundary; the final snapshot
+ * alone cannot identify the reset's position within this turn. Fail closed
+ * rather than assign an unproved post-reset total to the invocation.
  */
 function codexTurnDelta(
   snapshot: CodexUsageSnapshot,
@@ -1355,53 +1398,62 @@ export class CodexAdapter implements AgentAdapter<CodexEffort, boolean> {
     toolUses: number,
     threadId: string | undefined,
     resumed: boolean,
-  ): DonePayload['usage'] {
+  ): CodexTurnUsage {
     const snapshot = readCodexUsageSnapshot(rawUsage);
-    if (!snapshot || !threadId) {
-      // Once a cumulative snapshot for a known thread is malformed, the old
-      // baseline no longer borders the next valid turn. Keeping it would
-      // attribute both the malformed turn and its successor to the latter.
-      if (!snapshot && threadId) this.threadUsageBaselines.delete(threadId);
-      return mapUsage(rawUsage, toolUses);
+    const baseline = threadId
+      ? this.threadUsageBaselines.get(threadId)
+      : undefined;
+    const diagnostic: CodexUsageDiagnostic = {
+      status: 'omitted',
+      reason: 'invalid-usage',
+      resumed,
+      ...(threadId ? { threadId } : {}),
+      ...(snapshot ? { snapshot: codexUsageCounters(snapshot) } : {}),
+      ...(baseline ? { baseline: codexUsageCounters(baseline) } : {}),
+    };
+    const omitted = (reason: CodexUsageReason): CodexTurnUsage => ({
+      usage: { ...DEFAULT_DONE_USAGE, toolUses },
+      diagnostic: { ...diagnostic, reason },
+    });
+
+    if (!snapshot) {
+      // A missing snapshot breaks the attribution boundary for the next turn.
+      if (threadId) this.threadUsageBaselines.delete(threadId);
+      return omitted(rawUsage == null ? 'missing-usage' : 'invalid-usage');
     }
 
-    const baseline = this.threadUsageBaselines.get(threadId);
     // Always advance the baseline, so a thread recovers on its next turn even
     // when this one could not be attributed.
-    this.threadUsageBaselines.set(threadId, snapshot);
+    if (threadId) this.threadUsageBaselines.set(threadId, snapshot);
 
-    if (!baseline && resumed) {
-      return { ...DEFAULT_DONE_USAGE, toolUses };
+    if (threadId && !baseline && resumed) {
+      return omitted('missing-baseline');
     }
 
     // A newly appearing cumulative subset may contain spend from older turns,
     // while a disappearing one destroys the base needed to difference it.
-    // Fail closed for the transition, retaining this snapshot so the next
-    // turn with the same shape can be attributed again.
     if (baseline && !hasMatchingOptionalUsageShape(snapshot, baseline)) {
-      return { ...DEFAULT_DONE_USAGE, toolUses };
+      return omitted('counter-shape-changed');
     }
 
     const delta = codexTurnDelta(snapshot.values, baseline?.values);
-    if (!delta) {
-      return { ...DEFAULT_DONE_USAGE, toolUses };
-    }
+    if (!delta) return omitted('counter-decreased');
+    diagnostic.delta = codexUsageCounters({ ...snapshot, values: delta });
 
-    // Rebuild only the counters the snapshot actually carried, so a counter
-    // Codex never sent does not become a measured zero (engine-57).
-    const differenced: Record<string, unknown> = {
-      ...(isUsageRecord(rawUsage) ? rawUsage : {}),
-    };
+    // Rebuild only counters the snapshot carried, preserving absent vs zero.
+    const differenced: Record<string, unknown> = {};
     for (const [field, aliases] of CODEX_USAGE_ALIASES) {
-      if (!snapshot.present.has(field)) continue;
-      for (const alias of aliases) {
-        if (Object.prototype.hasOwnProperty.call(differenced, alias)) {
-          differenced[alias] = delta[field];
-        }
-      }
+      if (snapshot.present.has(field)) differenced[aliases[0]!] = delta[field];
     }
-
-    return mapUsage(differenced, toolUses);
+    const usage = mapUsage(differenced, toolUses);
+    return {
+      usage,
+      diagnostic: {
+        ...diagnostic,
+        status: usage.tokens ? 'reported' : 'omitted',
+        reason: usage.tokens ? 'reported' : 'invalid-token-subsets',
+      },
+    };
   }
 
   /**
@@ -1511,6 +1563,7 @@ export class CodexAdapter implements AgentAdapter<CodexEffort, boolean> {
     };
 
     let thread: CodexThread;
+    let streamRequested = false;
     let streamResult:
       { events: AsyncIterable<unknown> } | AsyncIterable<unknown> | undefined;
     try {
@@ -1525,15 +1578,22 @@ export class CodexAdapter implements AgentAdapter<CodexEffort, boolean> {
         thread = codex.startThread(threadOptions);
       }
 
+      streamRequested = typeof thread.runStreamed === 'function';
       streamResult = await (thread.runStreamed?.(prompt, runOptions) as
         | Promise<{ events: AsyncIterable<unknown> } | AsyncIterable<unknown>>
         | undefined);
     } catch (err) {
+      if (streamRequested && resumeSessionId) {
+        this.threadUsageBaselines.delete(resumeSessionId);
+      }
       await finishCodexRun();
       throw err;
     }
 
     if (!streamResult) {
+      if (streamRequested && resumeSessionId) {
+        this.threadUsageBaselines.delete(resumeSessionId);
+      }
       await finishCodexRun();
       throw new Error(
         'Codex SDK does not support runStreamed() in this version',
@@ -1551,6 +1611,7 @@ export class CodexAdapter implements AgentAdapter<CodexEffort, boolean> {
     let backendProvidedSessionId = false;
     const startTime = Date.now();
     let doneYielded = false;
+    let terminalUsageObserved = false;
     let initYielded = false;
     // Tool lifecycle correlation (codex-19): ids that already produced a
     // tool_use, ids that already produced their terminal tool_result, and
@@ -1746,7 +1807,20 @@ export class CodexAdapter implements AgentAdapter<CodexEffort, boolean> {
           // so the underlying message reaches the caller before the SDK's
           // exec wrapper raises a generic "Codex Exec exited" exception.
           const payload = toErrorPayload(event);
+          const accounting = this.resolveTurnUsage(
+            event.usage,
+            observedToolUseIds.size,
+            backendProvidedSessionId ? sessionId : resumeSessionId,
+            resumeSessionId !== undefined,
+          );
+          terminalUsageObserved = true;
           yield createEvent('error', AGENT, payload, sessionId);
+          yield createEvent(
+            'codex:usage',
+            AGENT,
+            accounting.diagnostic,
+            sessionId,
+          );
           yield createEvent(
             'done',
             AGENT,
@@ -1758,15 +1832,7 @@ export class CodexAdapter implements AgentAdapter<CodexEffort, boolean> {
                 sessionId,
                 resumeSessionId,
               ),
-              usage: this.withTurnRecord(
-                this.resolveTurnUsage(
-                  event.usage,
-                  observedToolUseIds.size,
-                  backendProvidedSessionId ? sessionId : resumeSessionId,
-                  resumeSessionId !== undefined,
-                ),
-                rateCardModel,
-              ),
+              usage: this.withTurnRecord(accounting.usage, rateCardModel),
               durationMs: Date.now() - startTime,
             },
             sessionId,
@@ -1788,6 +1854,20 @@ export class CodexAdapter implements AgentAdapter<CodexEffort, boolean> {
             asNumber(event.duration_ms) ??
             Date.now() - startTime;
 
+          const accounting = this.resolveTurnUsage(
+            turn.usage ?? event.usage,
+            observedToolUseIds.size,
+            // A resumed turn need not repeat thread.started.
+            backendProvidedSessionId ? sessionId : resumeSessionId,
+            resumeSessionId !== undefined,
+          );
+          terminalUsageObserved = true;
+          yield createEvent(
+            'codex:usage',
+            AGENT,
+            accounting.diagnostic,
+            sessionId,
+          );
           yield createEvent(
             'done',
             AGENT,
@@ -1800,17 +1880,7 @@ export class CodexAdapter implements AgentAdapter<CodexEffort, boolean> {
                 sessionId,
                 resumeSessionId,
               ),
-              usage: this.withTurnRecord(
-                this.resolveTurnUsage(
-                  turn.usage ?? event.usage,
-                  observedToolUseIds.size,
-                  // A resumed turn need not repeat thread.started, so the
-                  // inbound token identifies the same thread.
-                  backendProvidedSessionId ? sessionId : resumeSessionId,
-                  resumeSessionId !== undefined,
-                ),
-                rateCardModel,
-              ),
+              usage: this.withTurnRecord(accounting.usage, rateCardModel),
               durationMs,
             },
             sessionId,
@@ -1933,6 +2003,14 @@ export class CodexAdapter implements AgentAdapter<CodexEffort, boolean> {
         sessionId,
       );
     } finally {
+      if (!terminalUsageObserved) {
+        // An interrupted or broken stream can have billed work with no final
+        // snapshot. Never charge that unobserved work to the next resumed turn.
+        const usageThreadId = backendProvidedSessionId
+          ? sessionId
+          : resumeSessionId;
+        if (usageThreadId) this.threadUsageBaselines.delete(usageThreadId);
+      }
       await finishCodexRun();
     }
   }

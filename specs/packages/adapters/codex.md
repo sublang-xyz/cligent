@@ -288,7 +288,7 @@ When the adapter maps `AgentOptions.allowedTools` and `AgentOptions.disallowedTo
 
 ### codex-15
 
-Under [[engine-37](../engine.md#engine-37)]'s permitted per-session baseline and [[engine-38](../engine.md#engine-38)]'s same-resume serialization contract, when the adapter maps a cumulative `turn.completed` usage value classified by [[codex-53](#codex-53)] to one turn, it shall produce this provenance matrix:
+Under [[engine-37](../engine.md#engine-37)]'s permitted per-session baseline and [[engine-38](../engine.md#engine-38)]'s same-resume serialization contract, when the adapter accounts for a run using cumulative native terminal usage classified by [[codex-53](#codex-53)], it shall produce this provenance matrix:
 
 | State | Outcome |
 | --- | --- |
@@ -297,6 +297,8 @@ Under [[engine-37](../engine.md#engine-37)]'s permitted per-session baseline and
 | valid snapshot with the same optional-counter presence shape and no decreased counter | report the exact difference from the preceding snapshot and retain the current snapshot |
 | any decreased counter | omit tokens and retain the current snapshot so the next stable turn can recover |
 | usage value yielding no valid snapshot | omit tokens and discard any old baseline keyed by the latest backend thread identifier or, before one is observed on a resumed run, the non-empty inbound resume value |
+| run closes without native terminal usage after `runStreamed()` was invoked, through setup failure, abort, exhaustion, thrown stream failure, or consumer closure | discard the same baseline before releasing the session's serialization queue, because unobserved work may have advanced the native counters |
+| failure before `runStreamed()` is invoked | preserve the prior baseline because no execution request was made |
 | first valid resumed snapshot after a discarded baseline | omit tokens and establish the new baseline |
 | optional cache or reasoning counter presence changes | omit tokens and retain the new shape |
 | next valid same-shape, non-decreasing snapshot after a retained decrease or shape-transition baseline, or after the re-established post-malformed baseline | recover exact differencing |
@@ -325,6 +327,20 @@ When the adapter publishes current Codex token accounting, it shall produce this
 | requested model only | never use it as a record label, because it is not evidence of the effective model or a reroute |
 | any input, provenance, or validity failure named by [[codex-53](#codex-53)], [[codex-15](#codex-15)], or [[codex-16](#codex-16)] | omit `tokens` rather than publish a cumulative total, placeholder, or estimate |
 | any run | publish no cost because Codex exec reports none |
+
+### codex-59
+
+When the adapter consumes `turn.completed` or `turn.failed`, it shall emit one `codex:usage` diagnostic before terminal `done`, describing that terminal's accounting decision under [[codex-15](#codex-15)], [[codex-16](#codex-16)], and [[codex-53](#codex-53)] through this payload matrix:
+
+| Field | Outcome |
+| --- | --- |
+| `status` | `reported` when tokens are published; otherwise `omitted` |
+| `reason` | `reported`, `missing-usage`, `invalid-usage`, `missing-baseline`, `counter-shape-changed`, `counter-decreased`, or `invalid-token-subsets`, naming the decision reached by the accounting rules |
+| `resumed` | whether the run selected an inbound resume token |
+| `threadId` | latest known backend identifier, otherwise the inbound resume identifier, otherwise omitted |
+| `snapshot`, `baseline`, `delta` | independent copies of the numerically valid current cumulative counters, preceding retained counters, and arithmetic difference, respectively, when each is available |
+| counter fields | required `inputTokens` and `outputTokens`, plus only the present `cachedInputTokens`, `cacheWriteInputTokens`, and `reasoningOutputTokens`; exclude raw provider objects and invalid counter values |
+| numeric difference failing subset validation | retain it as diagnostic evidence; only `status: 'reported'` confirms a valid token report |
 
 ## Internal Behavior
 
@@ -587,6 +603,25 @@ Given authentic zero, nonzero, absent, malformed, and resumed accounting, when a
 - malformed, decreasing, unseen-resumed, optional-shape-transition, or otherwise unattributable accounting omits tokens and recovers only through [[codex-15](#codex-15)]'s valid baseline states;
 - every terminal preserves [[codex-29](#codex-29)]'s independently observed tool count, including when tokens are omitted; and
 - no current report publishes removed flat fields, an availability placeholder, requested-model attribution, or cost [[codex-17](#codex-17)].
+
+### codex-60
+
+Under [[codex-219](#codex-219)]'s credential precondition, when one `Cligent` and adapter run a fresh prompt and two automatic resumes through the real pinned SDK and CLI in isolated session storage, verification shall compare the unified events with independently captured native events:
+
+- all three invocations complete successfully on one backend thread [[codex-5](#codex-5)], [[codex-6](#codex-6)];
+- the fresh report equals the native snapshot and each resumed report equals the exact difference between consecutive native snapshots [[codex-15](#codex-15)];
+- present cache and reasoning subsets reconcile with inclusive totals, coverage remains partial, and no cost is invented [[codex-16](#codex-16)], [[codex-17](#codex-17)];
+- tool counts equal distinct native tool identities [[codex-29](#codex-29)]; and
+- each diagnostic identifies the native snapshot, preceding baseline, and reported difference [[codex-59](#codex-59)].
+
+### codex-61
+
+Given native success and failure streams with valid, absent, malformed, decreased, shape-changing, and invalid-subset usage, and interrupted, exhausted, thrown, or consumer-closed streams followed by resumed runs, when one adapter normalizes the streams, verification shall assert this accounting continuity matrix:
+
+- every native terminal's diagnostic names the exact report or omission reason, carries only validated counter copies with optional presence preserved, and precedes terminal `done` [[codex-59](#codex-59)];
+- changing a diagnostic payload does not mutate a later run's baseline [[codex-59](#codex-59)];
+- a run without native terminal usage invalidates its old baseline before a queued resume can use it; the next valid resumed snapshot omits tokens and establishes a baseline, and the following stable snapshot reports its own exact difference [[codex-15](#codex-15)]; and
+- omitted tokens leave observed tool counts and terminal status intact [[codex-29](#codex-29)], [[codex-25](#codex-25)], [[codex-26](#codex-26)], [[codex-27](#codex-27)].
 
 ### codex-49
 

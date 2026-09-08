@@ -184,6 +184,7 @@ function makeLoader(config: {
   onRun?: (prompt: string, options: MockRunOptions | undefined) => void;
   onEventConsumed?: (event: unknown) => void;
   throwFromRun?: Error;
+  throwFromStreamSetup?: Error;
 }): () => Promise<{ Codex: new () => MockCodexClient }> {
   async function* eventStream(): AsyncGenerator<unknown, void, void> {
     for (const event of config.events) {
@@ -210,6 +211,8 @@ function makeLoader(config: {
               runOptions?: MockRunOptions,
             ): Promise<{ events: AsyncIterable<unknown> }> {
               config.onRun?.(prompt, runOptions);
+              if (config.throwFromStreamSetup)
+                throw config.throwFromStreamSetup;
               return {
                 events: {
                   [Symbol.asyncIterator]: () => eventStream(),
@@ -230,6 +233,8 @@ function makeLoader(config: {
               runOptions?: MockRunOptions,
             ): Promise<{ events: AsyncIterable<unknown> }> {
               config.onRun?.(prompt, runOptions);
+              if (config.throwFromStreamSetup)
+                throw config.throwFromStreamSetup;
               return {
                 events: {
                   [Symbol.asyncIterator]: () => eventStream(),
@@ -273,6 +278,7 @@ describe('CodexAdapter', () => {
       'tool_result',
       'text',
       'codex:file_change',
+      'codex:usage',
       'done',
     ]);
     for (const event of events) {
@@ -316,7 +322,7 @@ describe('CodexAdapter', () => {
     // codex:file_change keeps passing the native item through unchanged.
     expect(events[6].payload).toEqual(canonicalFileChange);
 
-    const done = donePayload(events[7]);
+    const done = donePayload(events.at(-1)!);
     expect(done.status).toBe('success');
     expect(done.resumeToken).toBe(CANONICAL_THREAD_ID);
     // toolUses derives from the unique observed tool item ids; the SDK
@@ -401,11 +407,12 @@ describe('CodexAdapter', () => {
       'init',
       'tool_use',
       'tool_result',
+      'codex:usage',
       'done',
     ]);
     expect(toolUsePayload(events[1]).toolUseId).toBe(canonicalCommand.id);
     expect(toolResultPayload(events[2]).toolUseId).toBe(canonicalCommand.id);
-    expect(donePayload(events[3]).usage.toolUses).toBe(1);
+    expect(donePayload(events.at(-1)!).usage.toolUses).toBe(1);
   });
 
   it('keeps an explicitly reported zero distinct from unavailable usage', async () => {
@@ -743,7 +750,7 @@ describe('CodexAdapter', () => {
           },
         ],
         [
-          // Compaction restarts the thread's accounting; the drop cannot be
+          // A runtime reset restarts the thread's accounting; the drop cannot be
           // attributed to this turn.
           {
             type: 'turn.completed',
@@ -825,6 +832,351 @@ describe('CodexAdapter', () => {
     });
   });
 
+  it('emits a sanitized native usage diagnostic before done', async () => {
+    const adapter = new CodexAdapter({
+      loadSdk: makeQueuedLoader([
+        [
+          { type: 'thread.started', thread_id: 'diagnostic-thread' },
+          {
+            type: 'turn.completed',
+            usage: {
+              input_tokens: 100,
+              output_tokens: 30,
+              cached_input_tokens: 40,
+            },
+          },
+        ],
+        [
+          {
+            type: 'turn.completed',
+            usage: {
+              input_tokens: 160,
+              output_tokens: 50,
+              cached_input_tokens: 50,
+              private_payload: 'must not appear',
+            },
+          },
+        ],
+      ]),
+    });
+    const fresh = await collect(adapter.run('fresh'));
+    expect(fresh.map((event) => event.type)).toEqual([
+      'init',
+      'codex:usage',
+      'done',
+    ]);
+    const firstDiagnostic = fresh.at(-2)!;
+    expect(firstDiagnostic.payload).toEqual({
+      status: 'reported',
+      reason: 'reported',
+      resumed: false,
+      threadId: 'diagnostic-thread',
+      snapshot: { inputTokens: 100, outputTokens: 30, cachedInputTokens: 40 },
+      delta: { inputTokens: 100, outputTokens: 30, cachedInputTokens: 40 },
+    });
+    // Event consumers must not gain a mutable reference to the retained baseline.
+    (
+      firstDiagnostic.payload as { snapshot: { inputTokens: number } }
+    ).snapshot.inputTokens = 999;
+    const resumed = await collect(
+      adapter.run('resume', { resume: 'diagnostic-thread' }),
+    );
+    expect(resumed.at(-2)?.sessionId).toBe(resumed.at(-1)?.sessionId);
+    expect(resumed.at(-2)?.payload).toEqual({
+      status: 'reported',
+      reason: 'reported',
+      resumed: true,
+      threadId: 'diagnostic-thread',
+      snapshot: { inputTokens: 160, outputTokens: 50, cachedInputTokens: 50 },
+      baseline: { inputTokens: 100, outputTokens: 30, cachedInputTokens: 40 },
+      delta: { inputTokens: 60, outputTokens: 20, cachedInputTokens: 10 },
+    });
+    expect(donePayload(resumed.at(-1)!).usage.tokens?.totals).toEqual({
+      input: { total: 60, cacheRead: 10 },
+      output: { total: 20 },
+    });
+  });
+
+  it.each([
+    { name: 'missing', raw: undefined, reason: 'missing-usage' },
+    {
+      name: 'malformed',
+      raw: { input_tokens: 'private', output_tokens: 5 },
+      reason: 'invalid-usage',
+    },
+    {
+      name: 'conflicting aliases',
+      raw: { input_tokens: 100, inputTokens: 101, output_tokens: 5 },
+      reason: 'invalid-usage',
+    },
+    {
+      name: 'invalid subsets',
+      raw: { input_tokens: 5, output_tokens: 5, cached_input_tokens: 10 },
+      reason: 'invalid-token-subsets',
+    },
+  ])(
+    'explains $name native usage without exposing arbitrary fields',
+    async ({ raw, reason }) => {
+      const adapter = new CodexAdapter({
+        loadSdk: makeLoader({
+          events: [
+            { type: 'thread.started', thread_id: 'diagnostic-invalid' },
+            { type: 'turn.completed', usage: raw },
+          ],
+        }),
+      });
+      const events = await collect(adapter.run('prompt'));
+      expect(events.at(-2)?.type).toBe('codex:usage');
+      expect(events.at(-2)?.payload).toMatchObject({
+        status: 'omitted',
+        reason,
+        resumed: false,
+      });
+      expect(JSON.stringify(events.at(-2)?.payload)).not.toContain('private');
+      expect(donePayload(events.at(-1)!).usage).toEqual({ toolUses: 0 });
+      if (reason === 'invalid-usage' || reason === 'missing-usage') {
+        expect(events.at(-2)?.payload).not.toHaveProperty('snapshot');
+        expect(events.at(-2)?.payload).not.toHaveProperty('delta');
+      }
+    },
+  );
+
+  it.each([
+    {
+      name: 'unseen resume',
+      seed: undefined,
+      current: { input_tokens: 160, output_tokens: 50 },
+      reason: 'missing-baseline',
+    },
+    {
+      name: 'optional shape change',
+      seed: { input_tokens: 100, output_tokens: 30 },
+      current: {
+        input_tokens: 160,
+        output_tokens: 50,
+        cached_input_tokens: 20,
+      },
+      reason: 'counter-shape-changed',
+    },
+    {
+      name: 'decreased counter',
+      seed: { input_tokens: 100, output_tokens: 30 },
+      current: { input_tokens: 160, output_tokens: 20 },
+      reason: 'counter-decreased',
+    },
+    {
+      name: 'inconsistent delta subsets',
+      seed: { input_tokens: 100, output_tokens: 30, cached_input_tokens: 10 },
+      current: {
+        input_tokens: 120,
+        output_tokens: 50,
+        cached_input_tokens: 40,
+      },
+      reason: 'invalid-token-subsets',
+    },
+  ])(
+    'explains $name attribution failure',
+    async ({ seed, current, reason }) => {
+      const adapter = new CodexAdapter({
+        loadSdk: makeQueuedLoader([
+          ...(seed
+            ? [
+                [
+                  { type: 'thread.started', thread_id: 'diagnostic-resume' },
+                  { type: 'turn.completed', usage: seed },
+                ],
+              ]
+            : []),
+          [{ type: 'turn.completed', usage: current }],
+        ]),
+      });
+      if (seed) await collect(adapter.run('seed'));
+      const events = await collect(
+        adapter.run('resume', { resume: 'diagnostic-resume' }),
+      );
+      expect(events.at(-2)?.payload).toMatchObject({
+        status: 'omitted',
+        reason,
+        resumed: true,
+        threadId: 'diagnostic-resume',
+      });
+      expect(events.at(-2)?.payload).toHaveProperty('snapshot');
+      if (seed) expect(events.at(-2)?.payload).toHaveProperty('baseline');
+      else expect(events.at(-2)?.payload).not.toHaveProperty('baseline');
+      expect(donePayload(events.at(-1)!).usage.tokens).toBeUndefined();
+    },
+  );
+
+  it.each([
+    'abort',
+    'exhaustion',
+    'iterator error',
+    'consumer close',
+    'stream setup error',
+  ] as const)(
+    'invalidates an unobserved usage boundary after %s and recovers (native 0.151.0 fixture)',
+    async (exit) => {
+      const fixture = JSON.parse(
+        readFileSync(
+          new URL(
+            './fixtures/codex-interrupted-usage-0.151.0.json',
+            import.meta.url,
+          ),
+          'utf8',
+        ),
+      ) as {
+        threadId: string;
+        fresh: CodexUsage;
+        interruptedPersisted: CodexUsage;
+        resumed: CodexUsage;
+        resumedLastRequest: CodexUsage;
+      };
+      // This relation is the captured defect: subtracting the old successful
+      // baseline assigns the interrupted request to the resumed invocation.
+      expect(fixture.resumed.output_tokens - fixture.fresh.output_tokens).toBe(
+        120,
+      );
+      expect(fixture.resumedLastRequest.output_tokens).toBe(5);
+      expect(fixture.interruptedPersisted.output_tokens).toBe(120);
+      const controller = new AbortController();
+      const following = {
+        ...fixture.resumed,
+        input_tokens: fixture.resumed.input_tokens + 10,
+        output_tokens: fixture.resumed.output_tokens + 2,
+      };
+      const command = {
+        type: 'item.started',
+        item: {
+          id: 'pending-command',
+          type: 'command_execution',
+          command: 'sleep 30',
+          status: 'in_progress',
+        },
+      };
+      const loaders = [
+        makeLoader({
+          events: [
+            { type: 'thread.started', thread_id: fixture.threadId },
+            { type: 'turn.completed', usage: fixture.fresh },
+          ],
+        }),
+        makeLoader({
+          events: [command],
+          onEventConsumed: () => {
+            if (exit === 'abort') controller.abort();
+          },
+          ...(exit === 'iterator error'
+            ? { throwFromRun: new Error('transport closed') }
+            : {}),
+          ...(exit === 'stream setup error'
+            ? { throwFromStreamSetup: new Error('stream setup failed') }
+            : {}),
+        }),
+        makeLoader({
+          events: [{ type: 'turn.completed', usage: fixture.resumed }],
+        }),
+        makeLoader({ events: [{ type: 'turn.completed', usage: following }] }),
+      ];
+      let invocation = 0;
+      const adapter = new CodexAdapter({
+        loadSdk: () => loaders[invocation++]!(),
+      });
+      await collect(adapter.run('first'));
+      const interrupted = adapter.run('interrupted', {
+        resume: fixture.threadId,
+        abortSignal: controller.signal,
+      });
+      if (exit === 'stream setup error') {
+        await expect(collect(interrupted)).rejects.toThrow(
+          'stream setup failed',
+        );
+      } else if (exit === 'consumer close') {
+        expect((await interrupted.next()).value?.type).toBe('init');
+        expect((await interrupted.next()).value?.type).toBe('tool_use');
+        await interrupted.return();
+      } else {
+        const events = await collect(interrupted);
+        expect(donePayload(events.at(-1)!).usage).toEqual({ toolUses: 1 });
+        expect(events.some((event) => event.type === 'codex:usage')).toBe(
+          false,
+        );
+      }
+      const resumed = await collect(
+        adapter.run('resumed', { resume: fixture.threadId }),
+      );
+      expect(resumed.at(-2)?.payload).toMatchObject({
+        status: 'omitted',
+        reason: 'missing-baseline',
+      });
+      expect(resumed.at(-2)?.payload).not.toHaveProperty('baseline');
+      expect(donePayload(resumed.at(-1)!).usage.tokens).toBeUndefined();
+      const recovered = await collect(
+        adapter.run('following', { resume: fixture.threadId }),
+      );
+      expect(recovered.at(-2)?.payload).toMatchObject({
+        status: 'reported',
+        reason: 'reported',
+      });
+      expect(donePayload(recovered.at(-1)!).usage.tokens?.totals).toEqual({
+        input: { total: 10, uncached: 10, cacheRead: 0, cacheWrite: 0 },
+        output: { total: 2, visible: 2, reasoning: 0 },
+      });
+    },
+  );
+
+  it('retains an observed baseline when setup never calls the stream', async () => {
+    const loaders = [
+      makeLoader({
+        events: [
+          { type: 'thread.started', thread_id: 'setup-before-stream' },
+          {
+            type: 'turn.completed',
+            usage: { input_tokens: 100, output_tokens: 40 },
+          },
+        ],
+      }),
+      async () => ({
+        Codex: class {
+          startThread(): MockCodexThread {
+            return {} as MockCodexThread;
+          }
+          resumeThread(): MockCodexThread {
+            return {} as MockCodexThread;
+          }
+        },
+      }),
+      makeLoader({
+        events: [
+          {
+            type: 'turn.completed',
+            usage: { input_tokens: 140, output_tokens: 55 },
+          },
+        ],
+      }),
+    ];
+    let invocation = 0;
+    const adapter = new CodexAdapter({
+      loadSdk: () => loaders[invocation++]!(),
+    });
+    await collect(adapter.run('seed'));
+    await expect(
+      collect(
+        adapter.run('no stream method', { resume: 'setup-before-stream' }),
+      ),
+    ).rejects.toThrow('does not support runStreamed');
+    const resumed = await collect(
+      adapter.run('resume', { resume: 'setup-before-stream' }),
+    );
+    expect(resumed.at(-2)?.payload).toMatchObject({
+      reason: 'reported',
+      baseline: { inputTokens: 100, outputTokens: 40 },
+    });
+    expect(donePayload(resumed.at(-1)!).usage.tokens?.totals).toEqual({
+      input: { total: 40 },
+      output: { total: 15 },
+    });
+  });
+
   it('announces the call on item.updated when item.started was missed', async () => {
     const adapter = new CodexAdapter({
       loadSdk: makeLoader({ events: updateFirstEvents }),
@@ -835,11 +1187,12 @@ describe('CodexAdapter', () => {
       'init',
       'tool_use',
       'tool_result',
+      'codex:usage',
       'done',
     ]);
     expect(toolUsePayload(events[1]).toolUseId).toBe(canonicalCommand.id);
     expect(toolResultPayload(events[2]).toolUseId).toBe(canonicalCommand.id);
-    expect(donePayload(events[3]).usage.toolUses).toBe(1);
+    expect(donePayload(events.at(-1)!).usage.toolUses).toBe(1);
   });
 
   it('reports observed tool uses when the stream ends without a turn event', async () => {
@@ -862,7 +1215,7 @@ describe('CodexAdapter', () => {
     ]);
     const error = events[3] as AgentEvent & { payload: { code?: string } };
     expect(error.payload.code).toBe('MISSING_TURN_DONE');
-    const done = donePayload(events[4]);
+    const done = donePayload(events.at(-1)!);
     expect(done.status).toBe('error');
     expect(done.resumeToken).toBe('thread-exhausted');
     expect(done.usage.tokens).toBeUndefined();
@@ -890,7 +1243,7 @@ describe('CodexAdapter', () => {
     ]);
     const error = events[3] as AgentEvent & { payload: { code?: string } };
     expect(error.payload.code).toBe('SDK_STREAM_ERROR');
-    const done = donePayload(events[4]);
+    const done = donePayload(events.at(-1)!);
     expect(done.status).toBe('error');
     expect(done.resumeToken).toBe('thread-failed');
     expect(done.usage.tokens).toBeUndefined();
@@ -929,6 +1282,7 @@ describe('CodexAdapter', () => {
       'init',
       'tool_use',
       'tool_result',
+      'codex:usage',
       'done',
     ]);
 
@@ -938,7 +1292,7 @@ describe('CodexAdapter', () => {
     expect(toolResultPayload(events[2]).toolUseId).toBe(
       canonicalCommandCompleted.id,
     );
-    expect(donePayload(events[3]).usage.toolUses).toBe(1);
+    expect(donePayload(events.at(-1)!).usage.toolUses).toBe(1);
   });
 
   it('preserves native output and exit code for failed command executions', async () => {
@@ -951,6 +1305,7 @@ describe('CodexAdapter', () => {
       'init',
       'tool_use',
       'tool_result',
+      'codex:usage',
       'done',
     ]);
 
@@ -961,7 +1316,7 @@ describe('CodexAdapter', () => {
       aggregated_output: canonicalCommandFailed.aggregated_output,
       exit_code: 127,
     });
-    expect(donePayload(events[3]).usage.toolUses).toBe(1);
+    expect(donePayload(events.at(-1)!).usage.toolUses).toBe(1);
   });
 
   it('preserves native error details for failed MCP tool calls', async () => {
@@ -974,6 +1329,7 @@ describe('CodexAdapter', () => {
       'init',
       'tool_use',
       'tool_result',
+      'codex:usage',
       'done',
     ]);
 
@@ -1000,6 +1356,7 @@ describe('CodexAdapter', () => {
       'tool_use',
       'tool_result',
       'tool_result',
+      'codex:usage',
       'done',
     ]);
 
@@ -1012,7 +1369,7 @@ describe('CodexAdapter', () => {
       exit_code: 0,
     });
     expect(toolResultPayload(events[4]).toolUseId).toBe(interleavedCommandA.id);
-    expect(donePayload(events[5]).usage.toolUses).toBe(2);
+    expect(donePayload(events.at(-1)!).usage.toolUses).toBe(2);
   });
 
   it('emits at most one terminal tool_result for duplicated completions', async () => {
@@ -1025,9 +1382,10 @@ describe('CodexAdapter', () => {
       'init',
       'tool_use',
       'tool_result',
+      'codex:usage',
       'done',
     ]);
-    expect(donePayload(events[3]).usage.toolUses).toBe(1);
+    expect(donePayload(events.at(-1)!).usage.toolUses).toBe(1);
   });
 
   it('reports observed tool uses on the done event after turn.failed', async () => {
@@ -1041,9 +1399,10 @@ describe('CodexAdapter', () => {
       'tool_use',
       'tool_result',
       'error',
+      'codex:usage',
       'done',
     ]);
-    const done = donePayload(events[4]);
+    const done = donePayload(events.at(-1)!);
     expect(done.status).toBe('error');
     expect(done.usage.toolUses).toBe(1);
   });
@@ -1130,6 +1489,7 @@ describe('CodexAdapter', () => {
       'codex:file_change',
       'codex:file_change',
       'error',
+      'codex:usage',
       'done',
     ]);
 
@@ -1165,7 +1525,7 @@ describe('CodexAdapter', () => {
     expect(error.payload.message).toBe('transient hiccup');
     expect(error.payload.recoverable).toBe(true);
 
-    const done = donePayload(events[7]);
+    const done = donePayload(events.at(-1)!);
     expect(done.status).toBe('max_turns');
     expect(done.result).toBe('final summary');
     // toolUses derives from the unique observed tool-call ids (call-1);
@@ -1224,6 +1584,7 @@ describe('CodexAdapter', () => {
       'tool_result',
       'tool_result',
       'tool_result',
+      'codex:usage',
       'done',
     ]);
     expect(
@@ -1268,6 +1629,7 @@ describe('CodexAdapter', () => {
       'text',
       'text',
       'tool_result',
+      'codex:usage',
       'done',
     ]);
     expect(events[1]).toMatchObject({
@@ -1327,6 +1689,7 @@ describe('CodexAdapter', () => {
       'tool_use',
       'text',
       'tool_result',
+      'codex:usage',
       'done',
     ]);
   });
@@ -1355,7 +1718,12 @@ describe('CodexAdapter', () => {
     });
 
     const events = await collect(adapter.run('prompt'));
-    expect(events.map((event) => event.type)).toEqual(['init', 'text', 'done']);
+    expect(events.map((event) => event.type)).toEqual([
+      'init',
+      'text',
+      'codex:usage',
+      'done',
+    ]);
     const textEvents = events.filter((event) => event.type === 'text');
     expect(textEvents).toHaveLength(1);
     expect(
@@ -1390,7 +1758,12 @@ describe('CodexAdapter', () => {
     });
 
     const events = await collect(adapter.run('prompt'));
-    expect(events.map((event) => event.type)).toEqual(['init', 'text', 'done']);
+    expect(events.map((event) => event.type)).toEqual([
+      'init',
+      'text',
+      'codex:usage',
+      'done',
+    ]);
 
     const init = events[0] as AgentEvent & {
       payload: {
@@ -1438,7 +1811,7 @@ describe('CodexAdapter', () => {
     expect(error.payload.message).toBe('boom-before-first-event');
     expect(error.payload.recoverable).toBe(false);
 
-    const done = events[2] as AgentEvent & { payload: { status: string } };
+    const done = events.at(-1) as AgentEvent & { payload: { status: string } };
     expect(done.payload.status).toBe('error');
   });
 
@@ -1480,6 +1853,7 @@ describe('CodexAdapter', () => {
     expect(events.map((event) => event.type)).toEqual([
       'init',
       'error',
+      'codex:usage',
       'done',
     ]);
 
@@ -1492,7 +1866,7 @@ describe('CodexAdapter', () => {
     );
     expect(error.payload.code).toBe('model_not_found');
 
-    const done = events[2] as AgentEvent & {
+    const done = events.at(-1) as AgentEvent & {
       payload: { status: string; resumeToken?: string };
     };
     expect(done.payload.status).toBe('error');
@@ -1521,6 +1895,7 @@ describe('CodexAdapter', () => {
     expect(events.map((event) => event.type)).toEqual([
       'init',
       'error',
+      'codex:usage',
       'done',
     ]);
 
@@ -2002,7 +2377,9 @@ describe('CodexAdapter', () => {
     expect(events[0]?.sessionId).not.toBe('');
     expect(events[1]?.sessionId).toBe(events[0]?.sessionId);
     expect(events.at(-1)?.sessionId).toBe('empty-resume-thread');
-    expect(donePayload(events.at(-1)!).usage.tokens?.totals.input.total).toBe(5);
+    expect(donePayload(events.at(-1)!).usage.tokens?.totals.input.total).toBe(
+      5,
+    );
   });
 
   it('throws when resume is requested but SDK lacks resumeThread', async () => {
@@ -2726,13 +3103,14 @@ describe('CodexAdapter', () => {
     expect(events.map((event) => event.type)).toEqual([
       'init',
       'error',
+      'codex:usage',
       'done',
     ]);
     expect(events[1]?.payload).toMatchObject({
       code: 'unsupported_reasoning_effort',
       message: 'ultra is unavailable for this model or account',
     });
-    expect(events[2]?.payload).toMatchObject({ status: 'error' });
+    expect(events.at(-1)?.payload).toMatchObject({ status: 'error' });
   });
 
   it('throws descriptive error when Codex constructor fails', async () => {
@@ -2799,12 +3177,17 @@ describe('CodexAdapter', () => {
     });
 
     const events = await collect(adapter.run('prompt'));
-    expect(events.map((e) => e.type)).toEqual(['init', 'text', 'done']);
+    expect(events.map((e) => e.type)).toEqual([
+      'init',
+      'text',
+      'codex:usage',
+      'done',
+    ]);
 
     const text = events[1] as AgentEvent & { payload: { content: string } };
     expect(text.payload.content).toBe('direct iterable');
 
-    const done = events[2] as AgentEvent & { payload: { status: string } };
+    const done = events.at(-1) as AgentEvent & { payload: { status: string } };
     expect(done.payload.status).toBe('success');
   });
 
@@ -3223,12 +3606,27 @@ describe('resolveCodexBinPath', () => {
 // engine-85: even a structured stream failure may follow prompt execution.
 it('does not promote a Codex turn failure to resume rejection', async () => {
   let calls = 0;
-  const adapter = new CodexAdapter({ loadSdk: makeLoader({
-    events: [{ type: 'turn.failed', error: { code: 'SESSION_RESUME_REJECTED', message: 'session not found', retryable: true } }],
-    onRun() { calls++; },
-  }) });
+  const adapter = new CodexAdapter({
+    loadSdk: makeLoader({
+      events: [
+        {
+          type: 'turn.failed',
+          error: {
+            code: 'SESSION_RESUME_REJECTED',
+            message: 'session not found',
+            retryable: true,
+          },
+        },
+      ],
+      onRun() {
+        calls++;
+      },
+    }),
+  });
   const events = await collect(adapter.run('continue', { resume: 'saved' }));
-  expect(events.find((event) => event.type === 'error')?.payload).toMatchObject({ code: 'SDK_STREAM_ERROR', message: 'session not found' });
+  expect(events.find((event) => event.type === 'error')?.payload).toMatchObject(
+    { code: 'SDK_STREAM_ERROR', message: 'session not found' },
+  );
   expect(events.filter((event) => event.type === 'done')).toHaveLength(1);
   expect(calls).toBe(1);
 });
