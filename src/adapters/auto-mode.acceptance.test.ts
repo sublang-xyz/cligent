@@ -17,12 +17,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import { describe, expect, inject, it } from 'vitest';
 import {
   assertAcceptanceDependencies,
@@ -199,7 +201,11 @@ describe('adapter auto-mode real-run acceptance (claude-code-219 / codex-219 / g
             codexSandboxPreflight.summary,
         );
       }
+      const previousCodexHome = process.env.CODEX_HOME;
       const outcome = await probeCodexHostileUserConfigWithRetry();
+      expect(process.env.CODEX_HOME, 'caller CODEX_HOME is restored').toBe(
+        previousCodexHome,
+      );
       const sandboxFailure = sandboxInitFailureFromEvents(
         outcome.managed.events,
       );
@@ -223,9 +229,22 @@ describe('adapter auto-mode real-run acceptance (claude-code-219 / codex-219 / g
         outcome.managed.events,
       );
       expect(
-        outcome.managedOutsideCreated,
-        `codex: permission-managed run honored danger-full-access user config and wrote outside the workspace\n${formatEvents(outcome.managed.events)}`,
-      ).toBe(false);
+        outcome.controlContext,
+        'native no-policy permissions',
+      ).toMatchObject({
+        approval_policy: 'never',
+        sandbox_policy: { type: 'danger-full-access' },
+      });
+      // Auto-review can authorize an explicitly requested outside write, so
+      // file existence cannot diagnose whether the user config leaked.
+      expect(
+        outcome.managedContext,
+        'native managed permissions',
+      ).toMatchObject({
+        approval_policy: 'on-request',
+        approvals_reviewer: 'auto_review',
+        sandbox_policy: { type: 'workspace-write' },
+      });
     },
     PROBE_TIMEOUT_MS,
   );
@@ -680,7 +699,15 @@ interface CodexHostileUserConfigOutcome extends PhaseResult {
   readonly control: PhaseResult;
   readonly managed: PhaseResult;
   readonly controlOutsideCreated: boolean;
-  readonly managedOutsideCreated: boolean;
+  readonly controlContext: CodexNativePermissionContext | undefined;
+  readonly managedContext: CodexNativePermissionContext | undefined;
+}
+
+interface CodexNativePermissionContext {
+  readonly cwd: string;
+  readonly approval_policy: string;
+  readonly approvals_reviewer: string;
+  readonly sandbox_policy: { readonly type: string };
 }
 
 interface CodexSandboxWritablePathsOutcome {
@@ -796,7 +823,6 @@ async function runCodexHostileUserConfigProbe(): Promise<CodexHostileUserConfigO
   const controlFileName = `control_${randomUUID().slice(0, 8)}.txt`;
   const managedFileName = `managed_${randomUUID().slice(0, 8)}.txt`;
   const controlFilePath = join(root, controlFileName);
-  const managedFilePath = join(root, managedFileName);
   const controlCligent = new Cligent(new CodexAdapter(), {
     cwd: controlCwd,
   });
@@ -819,7 +845,16 @@ async function runCodexHostileUserConfigProbe(): Promise<CodexHostileUserConfigO
       control,
       managed,
       controlOutsideCreated: existsSync(controlFilePath),
-      managedOutsideCreated: existsSync(managedFilePath),
+      controlContext: await readCodexRootPermissionContext(
+        codexHome,
+        controlCwd,
+        control,
+      ),
+      managedContext: await readCodexRootPermissionContext(
+        codexHome,
+        managedCwd,
+        managed,
+      ),
     };
   } finally {
     if (previousCodexHome === undefined) {
@@ -828,8 +863,95 @@ async function runCodexHostileUserConfigProbe(): Promise<CodexHostileUserConfigO
       process.env.CODEX_HOME = previousCodexHome;
     }
     rmSync(root, { recursive: true, force: true });
-    rmSync(codexHome, { recursive: true, force: true });
+    // Native shutdown can finish writing SQLite state and coordination locks
+    // after the terminal event, so tolerate that bounded cleanup race.
+    rmSync(codexHome, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
   }
+}
+
+async function readCodexRootPermissionContext(
+  codexHome: string,
+  cwd: string,
+  phase: PhaseResult,
+): Promise<CodexNativePermissionContext | undefined> {
+  const done = phase.events.find((event) => event.type === 'done')?.payload as
+    DonePayload | undefined;
+  // Preserve the existing named-transient retry and sandbox-init handling.
+  if (done?.status !== 'success') return undefined;
+  const threadId = done.resumeToken;
+  if (!threadId)
+    throw new Error('Codex permission evidence lacks a root thread ID');
+
+  const findRollouts = (directory: string): string[] => {
+    if (!existsSync(directory)) return [];
+    return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+      const path = join(directory, entry.name);
+      if (entry.isDirectory()) return findRollouts(path);
+      return entry.isFile() && entry.name.endsWith(`-${threadId}.jsonl`)
+        ? [path]
+        : [];
+    });
+  };
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const paths = findRollouts(join(codexHome, 'sessions'));
+    if (paths.length > 1)
+      throw new Error('Codex permission evidence has duplicate root rollouts');
+    if (paths[0]) {
+      let rootIdentified = false;
+      // Pinned Codex persists the initial context before execution. Read only
+      // this root thread's isolated rollout; reviewer contexts are separate.
+      for (const line of readFileSync(paths[0], 'utf8').split('\n')) {
+        if (!line.trim()) continue;
+        let row: { type?: string; payload?: Record<string, unknown> };
+        try {
+          row = JSON.parse(line) as typeof row;
+        } catch {
+          throw new Error('Codex permission evidence contains malformed JSON');
+        }
+        if (row?.type === 'session_meta') {
+          if (row.payload?.id !== threadId)
+            throw new Error(
+              'Codex permission evidence has mismatched root metadata',
+            );
+          rootIdentified = true;
+        }
+        if (row?.type !== 'turn_context') continue;
+        const payload = row.payload;
+        const sandbox = payload?.sandbox_policy as
+          { type?: unknown } | undefined;
+        if (
+          !rootIdentified ||
+          payload?.cwd !== cwd ||
+          typeof payload.approval_policy !== 'string' ||
+          !payload.approval_policy ||
+          typeof payload.approvals_reviewer !== 'string' ||
+          !payload.approvals_reviewer ||
+          typeof sandbox?.type !== 'string' ||
+          !sandbox.type
+        ) {
+          throw new Error(
+            'Codex permission evidence has malformed or mismatched root context',
+          );
+        }
+        // Do not retain or print arbitrary native context, prompts, or config.
+        return {
+          cwd: payload.cwd,
+          approval_policy: payload.approval_policy,
+          approvals_reviewer: payload.approvals_reviewer,
+          sandbox_policy: { type: sandbox.type },
+        };
+      }
+    }
+    if (attempt < 9) await delay(100);
+  }
+  throw new Error(
+    'Codex permission evidence lacks the root thread initial context',
+  );
 }
 
 async function probeCodexHostileUserConfigWithRetry(): Promise<CodexHostileUserConfigOutcome> {
@@ -842,8 +964,8 @@ async function probeCodexHostileUserConfigWithRetry(): Promise<CodexHostileUserC
         outcome.control.events,
       );
       if (
-        outcome.managedOutsideCreated ||
-        (!outcome.controlOutsideCreated && controlAssessment.kind === 'success')
+        !outcome.controlOutsideCreated &&
+        controlAssessment.kind === 'success'
       ) {
         return undefined;
       }

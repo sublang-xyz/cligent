@@ -588,7 +588,13 @@ Given the Codex CLI can initialize its native sandbox, when a credential-free sa
 
 ### codex-224
 
-Given Codex credentials and a throwaway `CODEX_HOME` whose `config.toml` grants broader user-level access, when a no-policy run and then a `mode: 'auto'` run each attempts to write outside its working directory, the probe shall prove [[codex-31](#codex-31)]'s isolation matrix: the no-policy write succeeds without permission or error events, the managed write is absent without an error, both runs end successfully, the caller's `CODEX_HOME` is restored, and [[codex-219](#codex-219)]'s sandbox and `CI` conditions apply.
+Given [[codex-219](#codex-219)]'s credential, sandbox, and `CI` preconditions and a throwaway `CODEX_HOME` whose `config.toml` grants broader user-level access, when a no-policy run and then a `mode: 'auto'` run each attempts to write outside its working directory, the probe shall prove [[codex-31](#codex-31)]'s isolation matrix from the pinned native root threads' persisted permission contexts:
+
+- the no-policy context selects `danger-full-access` and approval policy `never`, and its write succeeds without permission or error events;
+- the managed context selects `workspace-write`, approval policy `on-request`, and reviewer `auto_review`, rather than the broader user configuration;
+- only each root thread's own context supplies evidence, excluding reviewer or other threads;
+- both runs end successfully, the caller's `CODEX_HOME` is restored, and isolated native storage is cleaned after bounded shutdown retries; and
+- an auto-reviewed outside write may succeed, so file existence alone is not evidence of user-config leakage [[2]].
 
 ### codex-229
 
