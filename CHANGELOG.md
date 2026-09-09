@@ -27,6 +27,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Real SDK verification reconciles fresh and resumed turns with cumulative
   counters.
 
+### Security
+
+- Update Vitest, Hono, js-yaml, and nanoid development dependencies to resolve
+  security advisories. Repository tests now use Node 20, 22, and 24; the published
+  package retains its separately verified Node 18.3.0 runtime floor.
+
 ## [0.26.0] - 2026-09-08
 
 ### Added
