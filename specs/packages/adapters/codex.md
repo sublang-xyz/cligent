@@ -45,7 +45,7 @@ When the adapter normalizes a Codex stream, it shall dispatch native events acco
 | other `item.completed` | each non-empty text block and compatibility event selected below, in source order |
 | `file_change`, `file.changed`, or `item.file_change` | `codex:file_change` carrying the first available `file`, `change`, `item`, or whole event |
 | `error` | `error` carrying the payload selected by [[codex-28](#codex-28)] |
-| `turn.completed` | terminal `done` selected by [[codex-23](#codex-23)] |
+| `turn.completed` | `codex:usage` selected by [[codex-59](#codex-59)], then terminal `done` selected by [[codex-23](#codex-23)] |
 | `turn.failed` | the terminal sequence selected by [[codex-24](#codex-24)] |
 | absent or any other event type | no event beyond the first-event `init` |
 | non-aborted stream exhaustion or failure | the terminal sequence selected by [[codex-25](#codex-25)] or [[codex-26](#codex-26)] |
@@ -119,7 +119,7 @@ When a run emits its exactly one `init`, the adapter shall select its payload ac
 
 ### codex-23
 
-When Codex emits `turn.completed`, the adapter shall emit one terminal `done`, stop consuming the stream, and select its payload according to this matrix:
+When Codex emits `turn.completed`, the adapter shall emit [[codex-59](#codex-59)]'s diagnostic followed by one terminal `done`, stop consuming the stream, and select the terminal payload according to this matrix:
 
 | Payload member | Selection |
 | --- | --- |
@@ -137,7 +137,7 @@ When Codex emits `turn.completed`, the adapter shall emit one terminal `done`, s
 
 ### codex-24
 
-When Codex emits `turn.failed`, the adapter shall yield an `error` selected by [[codex-28](#codex-28)], then terminal `done` with `status: 'error'`, the normal-terminal resume token in [[codex-6](#codex-6)], event usage mapped through [[codex-53](#codex-53)], [[codex-15](#codex-15)], [[codex-16](#codex-16)], [[codex-17](#codex-17)], and [[codex-29](#codex-29)], elapsed duration, and no result, stopping consumption before the SDK can replace that failure with a generic non-zero-exit error.
+When Codex emits `turn.failed`, the adapter shall yield an `error` selected by [[codex-28](#codex-28)], then [[codex-59](#codex-59)]'s diagnostic, then terminal `done` with `status: 'error'`, the normal-terminal resume token in [[codex-6](#codex-6)], event usage mapped through [[codex-53](#codex-53)], [[codex-15](#codex-15)], [[codex-16](#codex-16)], [[codex-17](#codex-17)], and [[codex-29](#codex-29)], elapsed duration, and no result, stopping consumption before the SDK can replace that failure with a generic non-zero-exit error.
 
 ### codex-25
 
@@ -297,11 +297,18 @@ Under [[engine-37](../engine.md#engine-37)]'s permitted per-session baseline and
 | valid snapshot with the same optional-counter presence shape and no decreased counter | report the exact difference from the preceding snapshot and retain the current snapshot |
 | any decreased counter | omit tokens and retain the current snapshot so the next stable turn can recover |
 | usage value yielding no valid snapshot | omit tokens and discard any old baseline keyed by the latest backend thread identifier or, before one is observed on a resumed run, the non-empty inbound resume value |
-| run closes without native terminal usage after `runStreamed()` was invoked, through setup failure, abort, exhaustion, thrown stream failure, or consumer closure | discard the same baseline before releasing the session's serialization queue, because unobserved work may have advanced the native counters |
-| failure before `runStreamed()` is invoked | preserve the prior baseline because no execution request was made |
 | first valid resumed snapshot after a discarded baseline | omit tokens and establish the new baseline |
 | optional cache or reasoning counter presence changes | omit tokens and retain the new shape |
 | next valid same-shape, non-decreasing snapshot after a retained decrease or shape-transition baseline, or after the re-established post-malformed baseline | recover exact differencing |
+
+### codex-62
+
+While a run has observed no native terminal usage, when it closes, the adapter shall maintain the retained token baseline according to this execution-boundary matrix under [[engine-37](../engine.md#engine-37)] and [[engine-38](../engine.md#engine-38)]:
+
+| Execution state | Outcome |
+| --- | --- |
+| `runStreamed()` was invoked, including setup failure, abort, exhaustion, thrown stream failure, or consumer closure | discard the baseline keyed by the latest backend thread identifier or, before one is observed on a resumed run, the non-empty inbound resume value, before releasing the session's serialization queue, because unobserved work may have advanced the native counters |
+| failure before `runStreamed()` was invoked | preserve the prior baseline because no execution request was made |
 
 ### codex-16
 
@@ -464,7 +471,7 @@ Given canned native Codex events typed against the SDK's canonical exported even
 
 | Case | Assertion |
 | --- | --- |
-| full interleaved command and MCP turn | ordered `init`, two correlated `tool_use`, two correlated `tool_result`, `text`, `codex:file_change`, and terminal `done`, with each pair's `toolUseId` equal to its native item `id`, native payloads, and one common backend session identifier |
+| full interleaved command and MCP turn | ordered `init`, two correlated `tool_use`, two correlated `tool_result`, `text`, `codex:file_change`, [[codex-59](#codex-59)]'s `codex:usage`, and terminal `done`, with each pair's `toolUseId` equal to its native item `id`, native payloads, and one common backend session identifier |
 | repeated updates | one `tool_use`, no event for later updates, and one terminal `tool_result` |
 | first observation at `item.updated` | announce the call there and correlate its later result |
 | completion without an earlier observation | synthesize the correlated `tool_use` immediately before the result |
@@ -483,7 +490,7 @@ Given each status, source position, result, duration, usage, and normal-or-inter
 
 ### codex-43
 
-Given Codex emits `turn.failed` with trailing native events, when the adapter runs, it shall expose the selected native failure as `error`, then one error-status `done` with its usage, duration, and resume selection, and consume none of the trailing events [[codex-24](#codex-24)].
+Given Codex emits `turn.failed` with trailing native events, when the adapter runs, it shall expose the selected native failure as `error`, then [[codex-59](#codex-59)]'s diagnostic, then one error-status `done` with its usage, duration, and resume selection, and consume none of the trailing events [[codex-24](#codex-24)].
 
 ### codex-44
 
@@ -622,11 +629,11 @@ Under [[codex-219](#codex-219)]'s credential precondition, when one `Cligent` an
 
 ### codex-61
 
-Given native success and failure streams with valid, absent, malformed, decreased, shape-changing, and invalid-subset usage, and interrupted, exhausted, thrown, or consumer-closed streams followed by resumed runs, when one adapter normalizes the streams, verification shall assert this accounting continuity matrix:
+Given native success and failure streams with valid, absent, malformed, decreased, shape-changing, and invalid-subset usage, and interrupted, exhausted, thrown, consumer-closed, or setup-failed invocations followed by resumed runs, when one adapter normalizes the streams, verification shall assert this accounting continuity matrix:
 
-- every native terminal's diagnostic names the exact report or omission reason, carries only validated counter copies with optional presence preserved, and precedes terminal `done` [[codex-59](#codex-59)];
+- every native terminal's diagnostic names the exact report or omission reason, carries numeric counter copies with optional presence preserved, retains an arithmetic difference even when its subsets are invalid, and precedes terminal `done` [[codex-59](#codex-59)];
 - changing a diagnostic payload does not mutate a later run's baseline [[codex-59](#codex-59)];
-- a run without native terminal usage invalidates its old baseline before a queued resume can use it; the next valid resumed snapshot omits tokens and establishes a baseline, and the following stable snapshot reports its own exact difference [[codex-15](#codex-15)]; and
+- a run without native terminal usage invalidates its old baseline before a queued resume can use it, while a pre-execution failure preserves the baseline [[codex-62](#codex-62)]; the next valid resumed snapshot after invalidation omits tokens and establishes a baseline, and the following stable snapshot reports its own exact difference [[codex-15](#codex-15)]; and
 - omitted tokens leave observed tool counts and terminal status intact [[codex-29](#codex-29)], [[codex-25](#codex-25)], [[codex-26](#codex-26)], [[codex-27](#codex-27)].
 
 ### codex-49

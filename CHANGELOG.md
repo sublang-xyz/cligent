@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `codex:usage` events before native terminal `done`, exposing cumulative
+  counters, retained baselines, and the reason tokens were reported or omitted.
 - Optional `estimateCost` helper with caller-supplied token prices or models.dev
   pricing cached for 24 hours. Estimates preserve reported coverage, disclose
   assumptions and applied rates, and remain separate from runtime-reported cost.
@@ -20,10 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Invalidate Codex token baselines after runs without native terminal usage,
+- Invalidate Codex token baselines after execution without native terminal usage,
   preventing interrupted work from being attributed to a later resumed turn.
-  Native completion diagnostics explain omitted accounting, and real SDK
-  verification reconciles fresh and resumed turns with cumulative counters.
+  Real SDK verification reconciles fresh and resumed turns with cumulative
+  counters.
 
 ## [0.26.0] - 2026-09-08
 

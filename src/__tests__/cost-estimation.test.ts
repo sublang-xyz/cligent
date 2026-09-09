@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
+import { randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, type ServerResponse } from 'node:http';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -16,7 +17,17 @@ import {
   type TokenUsage,
 } from '../index.js';
 
+vi.mock('node:os', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:os')>();
+  return { ...original, homedir: vi.fn(original.homedir) };
+});
+vi.mock('node:crypto', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:crypto')>();
+  return { ...original, randomUUID: vi.fn(original.randomUUID) };
+});
+
 const originalFetch = globalThis.fetch;
+const catalogLimit = 16 * 1024 * 1024;
 const ordinaryTokens: TokenUsage = {
   input: {
     total: 1_000_000,
@@ -57,6 +68,11 @@ function catalog(
   cost: unknown = { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
 ) {
   return { openai: { id: 'openai', models: { luna: { id: 'luna', cost } } } };
+}
+
+function paddedJson(value: unknown, bytes: number): string {
+  const json = JSON.stringify(value);
+  return json + ' '.repeat(bytes - Buffer.byteLength(json));
 }
 
 async function withCatalog(
@@ -128,6 +144,17 @@ describe('optional public cost estimation', () => {
       expect(result.coverage).toBe('partial');
       expect(result.records[0].prices).toEqual(supplied);
       expect(result.assumptions.join(' ')).toContain('uniformly');
+      expect(
+        estimated(
+          await estimateCost(input, {
+            prices: supplied,
+            model: '',
+            provider: ' ',
+            cachePath: '',
+            timeoutMs: NaN,
+          }),
+        ).amount,
+      ).toBe(result.amount);
       expect(input).toEqual(original);
       supplied.input = 99;
       input.tokens!.totals.input.total = 99;
@@ -340,7 +367,7 @@ describe('optional public cost estimation', () => {
     });
   });
 
-  it('prices separate records and prefers modern context bands to the legacy alias', async () => {
+  it('prices separate records at their context bands without tiering aggregate input', async () => {
     await withCatalog(async ({ options, respond }) => {
       respond((response) =>
         response.end(
@@ -355,7 +382,6 @@ describe('optional public cost estimation', () => {
                   output: 15,
                 },
               ],
-              context_over_200k: { input: 100, output: 100 },
             }),
           ),
         ),
@@ -439,21 +465,55 @@ describe('optional public cost estimation', () => {
     });
   });
 
-  it('supports legacy tier boundaries and rejects malformed modern tiers without using the legacy rate', async () => {
+  it('rejects malformed and duplicate context tier thresholds', async () => {
     await withCatalog(async ({ options, cachePath, respond }) => {
+      for (const sizes of [[-1], [272_000, 272_000]]) {
+        respond((response) =>
+          response.end(
+            JSON.stringify(
+              catalog({
+                input: 2,
+                output: 10,
+                tiers: sizes.map((size) => ({
+                  tier: { type: 'context', size },
+                  input: 4,
+                  output: 20,
+                })),
+              }),
+            ),
+          ),
+        );
+        expect(await estimateCost(simpleUsage(), options)).toMatchObject({
+          reason: 'unsupported-pricing',
+        });
+        await rm(cachePath);
+      }
+    });
+  });
+
+  it('does not inherit optional base prices into a selected context tier', async () => {
+    await withCatalog(async ({ options, respond }) => {
       respond((response) =>
         response.end(
           JSON.stringify(
             catalog({
               input: 2,
               output: 10,
-              context_over_200k: { input: 4, output: 20 },
+              cache_read: 0.2,
+              tiers: [
+                {
+                  tier: { type: 'context', size: 272_000 },
+                  input: 4,
+                  output: 20,
+                },
+              ],
             }),
           ),
         ),
       );
-      for (const total of [200_000, 200_001]) {
-        const input = simpleUsage(total);
+      for (const cacheRead of [100, 0]) {
+        const input = simpleUsage(272_000);
+        input.tokens!.totals.input.cacheRead = cacheRead;
         input.tokens!.records = [
           {
             model: 'luna',
@@ -462,28 +522,78 @@ describe('optional public cost estimation', () => {
             tokens: structuredClone(input.tokens!.totals),
           },
         ];
-        expect(
-          estimated(await estimateCost(input, options)).records[0].prices.input,
-        ).toBe(total === 200_000 ? 2 : 4);
+        const result = await estimateCost(input, options);
+        if (cacheRead > 0) {
+          expect(result).toMatchObject({ reason: 'missing-price' });
+        } else {
+          expect(estimated(result).records[0].prices).toEqual({
+            input: 4,
+            output: 20,
+          });
+        }
       }
-      await rm(cachePath);
+    });
+  });
+
+  it('honors distinct catalog reasoning prices without double charging output', async () => {
+    await withCatalog(async ({ options, respond }) => {
       respond((response) =>
         response.end(
           JSON.stringify(
             catalog({
               input: 2,
               output: 10,
-              tiers: [
-                { tier: { type: 'context', size: -1 }, input: 4, output: 20 },
-              ],
-              context_over_200k: { input: 4, output: 20 },
+              cache_read: 0.2,
+              cache_write: 2.5,
+              reasoning: 15,
             }),
           ),
         ),
       );
+      const result = estimated(await estimateCost(usage(), options));
+      expect(result.amount).toBeCloseTo(3.94, 12);
+      expect(result.records[0].prices.reasoning).toBe(15);
       expect(await estimateCost(simpleUsage(), options)).toMatchObject({
         reason: 'unsupported-pricing',
       });
+    });
+  });
+
+  it('rejects invalid catalog identities, storage options, and deadlines before retrieval', async () => {
+    await withCatalog(async ({ options, calls }) => {
+      for (const field of ['model', 'provider', 'cachePath']) {
+        for (const value of ['', ' ', null, 1]) {
+          expect(
+            await estimateCost(simpleUsage(), { ...options, [field]: value }),
+          ).toMatchObject({ reason: 'invalid-options' });
+        }
+      }
+      for (const timeoutMs of [
+        -1,
+        0,
+        0.5,
+        NaN,
+        Infinity,
+        2_147_483_648,
+        null,
+        '1000',
+      ]) {
+        expect(
+          await estimateCost(simpleUsage(), {
+            ...options,
+            timeoutMs,
+          } as CostEstimationOptions),
+        ).toMatchObject({ reason: 'invalid-options' });
+      }
+      for (const invalid of [null, [], 1]) {
+        expect(
+          await estimateCost(
+            simpleUsage(),
+            invalid as unknown as CostEstimationOptions,
+          ),
+        ).toMatchObject({ reason: 'invalid-options' });
+      }
+      expect(calls()).toBe(0);
     });
   });
 
@@ -556,7 +666,15 @@ describe('optional public cost estimation', () => {
         setTimeout(() => response.end(JSON.stringify(catalog())), 30);
       });
       const results = await Promise.all(
-        Array.from({ length: 5 }, () => estimateCost(usage(), options)),
+        Array.from({ length: 5 }, (_, index) =>
+          estimateCost(usage(), {
+            ...options,
+            cachePath:
+              index % 2 === 0
+                ? cachePath
+                : cachePath.replace(/cache\.json$/, './cache.json'),
+          }),
+        ),
       );
       for (const result of results) estimated(result);
       expect(calls()).toBe(2);
@@ -564,15 +682,86 @@ describe('optional public cost estimation', () => {
     });
   });
 
-  it('rejects oversized response bodies without retaining a catalog', async () => {
+  it('keeps concurrent refreshes for different cache paths independent', async () => {
+    await withCatalog(async ({ options, cachePath, calls, respond }) => {
+      const responses: ServerResponse[] = [];
+      respond((response) => {
+        responses.push(response);
+      });
+      const otherPath = `${cachePath}.other`;
+      const pending = [
+        estimateCost(simpleUsage(), options),
+        estimateCost(simpleUsage(), { ...options, cachePath: otherPath }),
+      ];
+      await vi.waitFor(() => expect(responses).toHaveLength(2));
+      for (const response of responses) {
+        response.end(JSON.stringify(catalog()));
+      }
+      for (const result of await Promise.all(pending)) estimated(result);
+      expect(calls()).toBe(2);
+      for (const path of [cachePath, otherPath]) {
+        expect(JSON.parse(await readFile(path, 'utf8')).version).toBe(1);
+      }
+    });
+  });
+
+  it('does not impose an outstanding longer deadline on another caller', async () => {
+    await withCatalog(async ({ options, calls, respond }) => {
+      const responses: ServerResponse[] = [];
+      respond((response) => {
+        responses.push(response);
+      });
+      let longerSettled = false;
+      const longer = estimateCost(simpleUsage(), {
+        ...options,
+        timeoutMs: 2000,
+      }).then((result) => {
+        longerSettled = true;
+        return result;
+      });
+      await vi.waitFor(() => expect(responses).toHaveLength(1));
+      expect(
+        await estimateCost(simpleUsage(), { ...options, timeoutMs: 100 }),
+      ).toMatchObject({ reason: 'catalog-unavailable' });
+      expect(calls()).toBe(2);
+      expect(longerSettled).toBe(false);
+      responses[0].end(JSON.stringify(catalog()));
+      estimated(await longer);
+    });
+  });
+
+  it('accepts a valid response at the byte limit and rejects one byte more', async () => {
     await withCatalog(async ({ options, respond, cachePath }) => {
-      respond((response) => response.end(' '.repeat(16 * 1024 * 1024 + 1)));
-      expect(await estimateCost(simpleUsage(), options)).toMatchObject({
+      respond((response) =>
+        response.end(paddedJson(catalog(), catalogLimit + 1)),
+      );
+      const bounded = { ...options, timeoutMs: 5000 };
+      expect(await estimateCost(simpleUsage(), bounded)).toMatchObject({
         reason: 'catalog-unavailable',
       });
       await expect(readFile(cachePath)).rejects.toMatchObject({
         code: 'ENOENT',
       });
+      respond((response) => response.end(paddedJson(catalog(), catalogLimit)));
+      estimated(await estimateCost(simpleUsage(), bounded));
+    });
+  });
+
+  it('accepts a valid cache at the byte limit and rejects one byte more', async () => {
+    await withCatalog(async ({ options, respond, cachePath, calls }) => {
+      respond((response) => {
+        response.writeHead(503);
+        response.end();
+      });
+      const entry = { version: 1, fetchedAt: Date.now(), catalog: catalog() };
+      await writeFile(cachePath, paddedJson(entry, catalogLimit));
+      estimated(await estimateCost(simpleUsage(), options));
+      expect(calls()).toBe(0);
+      await writeFile(cachePath, paddedJson(entry, catalogLimit + 1));
+      expect(await estimateCost(simpleUsage(), options)).toMatchObject({
+        reason: 'catalog-unavailable',
+      });
+      expect(calls()).toBe(1);
     });
   });
 
@@ -591,5 +780,94 @@ describe('optional public cost estimation', () => {
     });
     expect(isAbsolute(getDefaultPricingCachePath())).toBe(true);
     expect(getDefaultPricingCachePath()).toMatch(/models-dev-v1\.json$/);
+  });
+
+  it('returns unavailable for home-directory lookup failures while explicit inputs remain usable', async () => {
+    await withCatalog(async ({ options, calls }) => {
+      vi.stubEnv('LOCALAPPDATA', '');
+      vi.stubEnv('XDG_CACHE_HOME', '');
+      const home = vi.mocked(homedir).mockImplementation(() => {
+        throw new Error('Home directory unavailable');
+      });
+      try {
+        expect(
+          await estimateCost(simpleUsage(), {
+            ...options,
+            cachePath: undefined,
+          }),
+        ).toMatchObject({ reason: 'catalog-unavailable' });
+        expect(calls()).toBe(0);
+        estimated(await estimateCost(simpleUsage(), { prices }));
+        estimated(await estimateCost(simpleUsage(), options));
+      } finally {
+        home.mockReset();
+        vi.unstubAllEnvs();
+      }
+    });
+  });
+
+  it('returns unavailable when resolving a relative cache path cannot read the working directory', async () => {
+    await withCatalog(async ({ options, calls }) => {
+      const cwd = vi.spyOn(process, 'cwd').mockImplementation(() => {
+        throw new Error('Working directory unavailable');
+      });
+      let result: CostEstimateResult;
+      try {
+        result = await estimateCost(simpleUsage(), {
+          ...options,
+          cachePath: 'pricing-cache.json',
+        });
+      } finally {
+        cwd.mockRestore();
+      }
+      expect(result).toMatchObject({ reason: 'catalog-unavailable' });
+      expect(calls()).toBe(0);
+    });
+  });
+
+  it('uses absolute platform cache locations without looking up a home directory', () => {
+    const originalProcess = process;
+    const configured = join(tmpdir(), 'cligent-configured-cache');
+    const home = vi.mocked(homedir).mockImplementation(() => {
+      throw new Error('Home directory unavailable');
+    });
+    try {
+      for (const [platform, variable] of [
+        ['win32', 'LOCALAPPDATA'],
+        ['linux', 'XDG_CACHE_HOME'],
+      ]) {
+        vi.stubGlobal('process', {
+          ...originalProcess,
+          platform,
+          env: { ...originalProcess.env, [variable]: configured },
+        });
+        expect(getDefaultPricingCachePath()).toBe(
+          join(configured, 'cligent', 'models-dev-v1.json'),
+        );
+      }
+    } finally {
+      vi.unstubAllGlobals();
+      home.mockReset();
+    }
+  });
+
+  it('retains fetched prices when preparing an atomic cache write fails', async () => {
+    await withCatalog(async ({ options, cachePath }) => {
+      const uuid = vi.mocked(randomUUID).mockImplementation(() => {
+        throw new Error('Randomness unavailable');
+      });
+      try {
+        const result = estimated(await estimateCost(simpleUsage(), options));
+        expect(result.source).toMatchObject({
+          type: 'models.dev',
+          stale: false,
+        });
+        await expect(readFile(cachePath)).rejects.toMatchObject({
+          code: 'ENOENT',
+        });
+      } finally {
+        uuid.mockReset();
+      }
+    });
   });
 });
