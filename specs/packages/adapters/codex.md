@@ -342,7 +342,7 @@ When the adapter consumes `turn.completed` or `turn.failed`, it shall emit one `
 | Field | Outcome |
 | --- | --- |
 | `status` | `reported` when tokens are published; otherwise `omitted` |
-| `reason` | `reported`, `missing-usage`, `invalid-usage`, `missing-baseline`, `counter-shape-changed`, `counter-decreased`, or `invalid-token-subsets`, naming the decision reached by the accounting rules |
+| `reason` | `missing-usage` when the selected usage value is absent, `undefined`, or `null`; `invalid-usage` when any other value yields no valid snapshot under [[codex-53](#codex-53)]; otherwise `reported`, `missing-baseline`, `counter-shape-changed`, `counter-decreased`, or `invalid-token-subsets`, naming the decision reached by the accounting rules |
 | `resumed` | whether the run selected an inbound resume token |
 | `threadId` | latest known backend identifier, otherwise the inbound resume identifier, otherwise omitted |
 | `snapshot`, `baseline`, `delta` | independent copies of the numerically valid current cumulative counters, preceding retained counters, and arithmetic difference, respectively, when each is available |

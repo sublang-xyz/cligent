@@ -790,6 +790,9 @@ describe('optional public cost estimation', () => {
         throw new Error('Home directory unavailable');
       });
       try {
+        expect(() => getDefaultPricingCachePath()).toThrow(
+          'Home directory unavailable',
+        );
         expect(
           await estimateCost(simpleUsage(), {
             ...options,

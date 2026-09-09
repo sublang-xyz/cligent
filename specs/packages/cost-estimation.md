@@ -119,13 +119,15 @@ When catalog retrieval starts, the estimator shall bound the complete response, 
 
 ### cost-estimation-10
 
-When the estimator resolves cache storage, it shall use the caller's nonempty `cachePath` when supplied, otherwise the file returned by `getDefaultPricingCachePath()` according to this platform matrix:
+When cache storage is resolved through the pricing API, it shall use an estimator call's nonempty `cachePath` when supplied, otherwise the file returned by `getDefaultPricingCachePath()` according to this platform matrix:
 
 | Platform | Default file |
 | --- | --- |
 | macOS | `~/Library/Caches/cligent/models-dev-v1.json` |
 | Windows | `%LOCALAPPDATA%/cligent/models-dev-v1.json` when the variable is absolute, otherwise `~/AppData/Local/cligent/models-dev-v1.json` |
 | other | `$XDG_CACHE_HOME/cligent/models-dev-v1.json` when the variable is absolute, otherwise `~/.cache/cligent/models-dev-v1.json` |
+
+A direct `getDefaultPricingCachePath()` call propagates an operating-system lookup error; `estimateCost` instead returns `catalog-unavailable` under [[cost-estimation-8](#cost-estimation-8)].
 
 ### cost-estimation-11
 

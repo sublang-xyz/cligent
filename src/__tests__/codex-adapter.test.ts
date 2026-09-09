@@ -184,7 +184,6 @@ function makeLoader(config: {
   onRun?: (prompt: string, options: MockRunOptions | undefined) => void;
   onEventConsumed?: (event: unknown) => void;
   throwFromRun?: Error;
-  throwFromStreamSetup?: Error;
 }): () => Promise<{ Codex: new () => MockCodexClient }> {
   async function* eventStream(): AsyncGenerator<unknown, void, void> {
     for (const event of config.events) {
@@ -211,8 +210,6 @@ function makeLoader(config: {
               runOptions?: MockRunOptions,
             ): Promise<{ events: AsyncIterable<unknown> }> {
               config.onRun?.(prompt, runOptions);
-              if (config.throwFromStreamSetup)
-                throw config.throwFromStreamSetup;
               return {
                 events: {
                   [Symbol.asyncIterator]: () => eventStream(),
@@ -233,8 +230,6 @@ function makeLoader(config: {
               runOptions?: MockRunOptions,
             ): Promise<{ events: AsyncIterable<unknown> }> {
               config.onRun?.(prompt, runOptions);
-              if (config.throwFromStreamSetup)
-                throw config.throwFromStreamSetup;
               return {
                 events: {
                   [Symbol.asyncIterator]: () => eventStream(),
@@ -899,6 +894,10 @@ describe('CodexAdapter', () => {
 
   it.each([
     { name: 'missing', raw: undefined, reason: 'missing-usage' },
+    { name: 'null', raw: null, reason: 'missing-usage' },
+    { name: 'array', raw: [], reason: 'invalid-usage' },
+    { name: 'primitive', raw: 0, reason: 'invalid-usage' },
+    { name: 'missing required counters', raw: {}, reason: 'invalid-usage' },
     {
       name: 'malformed',
       raw: { input_tokens: 'private', output_tokens: 5 },

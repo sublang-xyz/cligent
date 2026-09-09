@@ -530,7 +530,10 @@ triggers retrieval; deleting it forces retrieval on the next catalog-based call.
 If refresh fails, a valid older snapshot can still be used with `source.stale`
 and its original `fetchedAt`. Without usable prices, the result is `unavailable`.
 You can override `cachePath` and the retrieval `timeoutMs` (default 5,000).
-`getDefaultPricingCachePath()` identifies the platform's Cligent cache file.
+`getDefaultPricingCachePath()` identifies the platform's Cligent cache file and
+can throw if the operating system cannot resolve its location. Catch that error
+when calling the accessor directly; `estimateCost` returns `catalog-unavailable`
+for the same failure. An explicit `cachePath` avoids default-path lookup.
 
 Estimates preserve complete or partial token coverage and return the exact rates
 used for reproducibility. Cache and reasoning subsets replace ordinary rates
