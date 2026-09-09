@@ -2,12 +2,7 @@
 // SPDX-FileCopyrightText: 2026 SubLang International <https://sublang.ai>
 
 import { buildTokenUsage, sumTokenUsage } from './adapters/usage.js';
-import {
-  getDefaultPricingCachePath,
-  isObject,
-  loadPricingCatalog,
-  PRICING_URL,
-} from './pricing-cache.js';
+import { isObject, loadPricingCatalog, PRICING_URL } from './pricing-cache.js';
 import type {
   DoneUsage,
   TokenUsage,
@@ -29,11 +24,11 @@ export interface TokenPrices {
 export interface CostEstimationOptions {
   /** Authoritative rates for the entire reported workload; bypasses all I/O. */
   prices?: TokenPrices;
-  /** Assumed model only where a usage record does not identify its model. */
+  /** Catalog-only model assumption where a usage record lacks its model. */
   model?: string;
-  /** Explicit models.dev provider, overriding native authentication families. */
+  /** Catalog-only provider override for native authentication families. */
   provider?: string;
-  /** Override the file returned by getDefaultPricingCachePath(). */
+  /** Catalog-only override of the file from getDefaultPricingCachePath(). */
   cachePath?: string;
   /** Catalog retrieval deadline, including the response body; default 5000. */
   timeoutMs?: number;
@@ -336,15 +331,6 @@ function catalogPrices(
       }
       tiers.push({ size, prices });
     }
-  } else if (hasOwn(cost, 'context_over_200k')) {
-    const prices = readPrices(cost.context_over_200k, true);
-    if (!prices)
-      return unavailable(
-        'unsupported-pricing',
-        'The legacy context price is invalid.',
-      );
-    // Legacy spelling means strictly over 200k, unlike the modern band start.
-    tiers.push({ size: 200_001, prices });
   }
   if (tiers.length > 0 && record.requests !== 1) {
     assumptions.add(
@@ -368,18 +354,8 @@ export async function estimateCost(
   // Snapshot every calculation input before catalog retrieval yields control.
   const snapshot = snapshotUsage(usage);
   if ('status' in snapshot) return snapshot;
-  if (
-    !isObject(options) ||
-    (options.model !== undefined && !name(options.model)) ||
-    (options.provider !== undefined && !name(options.provider))
-  ) {
-    return unavailable(
-      'invalid-options',
-      'Model and provider options must be nonempty strings.',
-    );
-  }
-  const assumedModel = options.model;
-  const assumedProvider = options.provider;
+  if (!isObject(options))
+    return unavailable('invalid-options', 'Options must be an object.');
   const assumptions = new Set<string>([
     'Text-token prices exclude subscription fees and other non-token charges; this estimate is not a bill.',
   ]);
@@ -412,7 +388,19 @@ export async function estimateCost(
     }
     source = { type: 'caller' };
   } else {
-    const timeoutMs = options.timeoutMs ?? 5000;
+    const assumedModel = options.model;
+    const assumedProvider = options.provider;
+    if (
+      (assumedModel !== undefined && !name(assumedModel)) ||
+      (assumedProvider !== undefined && !name(assumedProvider))
+    ) {
+      return unavailable(
+        'invalid-options',
+        'Model and provider options must be nonempty strings.',
+      );
+    }
+    const timeoutMs =
+      options.timeoutMs === undefined ? 5000 : options.timeoutMs;
     if (
       typeof timeoutMs !== 'number' ||
       !Number.isSafeInteger(timeoutMs) ||
@@ -452,10 +440,7 @@ export async function estimateCost(
         'missing-provider',
         'Supply a models.dev provider when the token report does not identify its pricing provider.',
       );
-    const loaded = await loadPricingCatalog(
-      options.cachePath ?? getDefaultPricingCachePath(),
-      timeoutMs,
-    );
+    const loaded = await loadPricingCatalog(options.cachePath, timeoutMs);
     if (!loaded)
       return unavailable(
         'catalog-unavailable',

@@ -6,6 +6,7 @@
 ## Status
 
 Accepted
+Amended by [DR-024](024-optional-cost-estimation.md): optional caller-requested estimates remain separate from runtime-reported accounting.
 
 ## Context
 

@@ -37,7 +37,7 @@ Valid counters are nonnegative safe integers, present details obey the inclusive
 
 ### cost-estimation-3
 
-When an estimator call supplies `prices`, it shall use that rate card uniformly for each reported record, falling back to one group of report totals only when records are absent, bypass all cache and network access, disclose the uniform-rate assumption, and return `invalid-prices` for a missing required rate or any present rate that is not finite and nonnegative, admitting explicit zero.
+When an estimator call supplies `prices`, it shall use that rate card uniformly for each reported record, falling back to one group of report totals only when records are absent, ignore catalog-only `model`, `provider`, `cachePath`, and `timeoutMs` options, bypass all cache and network access, disclose the uniform-rate assumption, and return `invalid-prices` for a missing required rate or any present rate that is not finite and nonnegative, admitting explicit zero.
 
 ### cost-estimation-4
 
@@ -62,9 +62,10 @@ When the estimator selects a catalog model's rates from models.dev [[1]][[2]][[3
 | missing or invalid required base `cost.input` or `cost.output`, or invalid optional rates | `missing-price` |
 | base rates | map `input`, `output`, `cache_read`, `cache_write`, and `reasoning` to `TokenPrices` |
 | present `cost.tiers` | require context tiers with unique nonnegative safe-integer `tier.size` and valid complete rate cards; unsupported shapes yield `unsupported-pricing` |
-| absent modern tiers and present `context_over_200k` | admit its valid complete rate card for input strictly greater than 200,000; invalid shape yields `unsupported-pricing` |
 | tiers and exactly one reported request | choose the highest threshold no greater than this record's inclusive input, otherwise base rates |
 | tiers and aggregated or unreported request count | use base rates and disclose the standard-context assumption |
+
+A complete rate card requires finite, nonnegative `input` and `output` rates and independently valid optional rates; a selected tier replaces the base card, leaving omitted optional rates unknown.
 
 ### cost-estimation-6
 
@@ -105,6 +106,7 @@ When a catalog-based call needs prices, it shall resolve its disk cache accordin
 | cache write failure | retain the successful calculation |
 | failed refresh with a valid older snapshot | use that snapshot with `stale: true` and its original retrieval date |
 | failed refresh without a valid snapshot | `catalog-unavailable` |
+| cache location cannot be resolved | `catalog-unavailable` |
 | deleted cache before a later call | retrieve again, without a retained in-memory catalog satisfying that call |
 
 ### cost-estimation-9
@@ -117,13 +119,15 @@ When catalog retrieval starts, the estimator shall bound the complete response, 
 
 ### cost-estimation-10
 
-When the estimator resolves cache storage, it shall use the caller's nonempty `cachePath` when supplied, otherwise the file returned by `getDefaultPricingCachePath()` according to this platform matrix:
+When cache storage is resolved through the pricing API, it shall use an estimator call's nonempty `cachePath` when supplied, otherwise the file returned by `getDefaultPricingCachePath()` according to this platform matrix:
 
 | Platform | Default file |
 | --- | --- |
 | macOS | `~/Library/Caches/cligent/models-dev-v1.json` |
 | Windows | `%LOCALAPPDATA%/cligent/models-dev-v1.json` when the variable is absolute, otherwise `~/AppData/Local/cligent/models-dev-v1.json` |
 | other | `$XDG_CACHE_HOME/cligent/models-dev-v1.json` when the variable is absolute, otherwise `~/.cache/cligent/models-dev-v1.json` |
+
+A direct `getDefaultPricingCachePath()` call propagates an operating-system lookup error; `estimateCost` instead returns `catalog-unavailable` under [[cost-estimation-8](#cost-estimation-8)].
 
 ### cost-estimation-11
 
@@ -137,11 +141,11 @@ Where the public estimator is called with complete, partial, zero, missing, inva
 
 ### cost-estimation-13
 
-Where the public estimator resolves fixture catalogs through an HTTP boundary and temporary cache files, verification shall assert the identity, modern/legacy context-tier, missing/invalid price, assumption, and provenance matrix in [[cost-estimation-4](#cost-estimation-4)], [[cost-estimation-5](#cost-estimation-5)], and [[cost-estimation-7](#cost-estimation-7)], including aggregated requests whose cumulative input must not select a per-request tier.
+Where the public estimator resolves fixture catalogs through an HTTP boundary and temporary cache files, verification shall assert the identity, context-tier, missing/invalid price, assumption, and provenance matrix in [[cost-estimation-4](#cost-estimation-4)], [[cost-estimation-5](#cost-estimation-5)], and [[cost-estimation-7](#cost-estimation-7)], including aggregated requests whose cumulative input must not select a per-request tier.
 
 ### cost-estimation-14
 
-Where the public estimator runs with temporary cache files and controlled HTTP responses, verification shall assert fresh reuse, expiration, deletion, malformed and future-dated cache, stale fallback, failed writes, concurrency, body-size limits, and response timeouts under [[cost-estimation-8](#cost-estimation-8)], [[cost-estimation-9](#cost-estimation-9)], [[cost-estimation-10](#cost-estimation-10)], and [[cost-estimation-11](#cost-estimation-11)].
+Where the public estimator runs with temporary cache files and controlled HTTP responses, verification shall assert fresh reuse, expiration, deletion, malformed and future-dated cache, stale fallback, failed location resolution and writes, concurrency, body-size limits, and response timeouts under [[cost-estimation-8](#cost-estimation-8)], [[cost-estimation-9](#cost-estimation-9)], [[cost-estimation-10](#cost-estimation-10)], and [[cost-estimation-11](#cost-estimation-11)].
 
 ### cost-estimation-15
 

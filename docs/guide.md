@@ -461,10 +461,12 @@ the previous snapshot on the adapter and subtracts it to report one invocation.
 A new adapter resuming an existing thread has no such baseline: its first
 valid native usage snapshot omits tokens and establishes a baseline for the next turn.
 
-If a run ends without native terminal usage (for example, after an interrupt),
-Cligent discards the old baseline. The next valid resumed snapshot also omits tokens
-and establishes a new baseline. This prevents unobserved work from the interrupted
-run being charged to a later invocation. Tool counts remain independently available.
+If execution was requested and a run ends without native terminal usage
+(for example, after an interrupt), Cligent discards the old baseline.
+Failures before execution was requested preserve it. The next valid resumed
+snapshot after a discard omits tokens and establishes a new baseline. This
+prevents unobserved work from the interrupted run being charged to a later
+invocation. Tool counts remain independently available.
 
 Each native completion or failure emits `codex:usage` before `done`. Its payload
 contains `status`, an exact `reason`, `resumed`, the known `threadId`, and available
@@ -475,7 +477,7 @@ exclude raw provider payloads. A diagnostic delta can fail subset validation;
 only `status: 'reported'` confirms a valid token report. Capture diagnostics alongside `done` when investigating
 missing tokens; a successful turn alone does not prove attributable usage.
 
-The [resume accounting investigation](codex-resume-accounting.md) documents the
+The [resume accounting investigation](https://github.com/sublang-ai/cligent/pull/51) documents the
 reproduction and the limits of the original dogfooding evidence.
 
 ### Optional cost estimates
@@ -492,8 +494,8 @@ const custom = await estimateCost(usage, {
   prices: { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 },
 });
 
-// Otherwise use models.dev. Codex often omits the effective model/provider,
-// so explicitly supply the assumptions you want to use for the estimate.
+// Otherwise select the models.dev identities for your billing route.
+// This Codex example supplies both because native usage often omits them.
 const estimate = await estimateCost(usage, {
   provider: 'openai',
   model: 'gpt-5.6-luna',
@@ -514,15 +516,24 @@ Without caller prices, native model/provider records select exact entries from
 identity; `provider` explicitly selects the catalog provider for every record,
 including when a native authentication-family name differs. Both choices are
 reported as assumptions. No built-in provider alias or price table is maintained.
+Claude Code often omits its provider, and Gemini reports an authentication type
+rather than a catalog key. Supply the provider matching your intended prices:
+`provider: 'anthropic'` for direct Anthropic rates or `provider: 'google'` for
+Google Gemini rates, for example. Choose the corresponding catalog provider
+when using a different billing route; these options express pricing assumptions.
 One supplied `prices` card applies uniformly across models while preserving known
-per-record token details.
+per-record token details and ignores the catalog-only `model`, `provider`,
+`cachePath`, and `timeoutMs` options.
 
 Catalog prices are cached on disk for 24 hours. A missing or expired cache
 triggers retrieval; deleting it forces retrieval on the next catalog-based call.
 If refresh fails, a valid older snapshot can still be used with `source.stale`
 and its original `fetchedAt`. Without usable prices, the result is `unavailable`.
 You can override `cachePath` and the retrieval `timeoutMs` (default 5,000).
-`getDefaultPricingCachePath()` identifies the platform's Cligent cache file.
+`getDefaultPricingCachePath()` identifies the platform's Cligent cache file and
+can throw if the operating system cannot resolve its location. Catch that error
+when calling the accessor directly; `estimateCost` returns `catalog-unavailable`
+for the same failure. An explicit `cachePath` avoids default-path lookup.
 
 Estimates preserve complete or partial token coverage and return the exact rates
 used for reproducibility. Cache and reasoning subsets replace ordinary rates

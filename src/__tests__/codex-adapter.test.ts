@@ -184,7 +184,6 @@ function makeLoader(config: {
   onRun?: (prompt: string, options: MockRunOptions | undefined) => void;
   onEventConsumed?: (event: unknown) => void;
   throwFromRun?: Error;
-  throwFromStreamSetup?: Error;
 }): () => Promise<{ Codex: new () => MockCodexClient }> {
   async function* eventStream(): AsyncGenerator<unknown, void, void> {
     for (const event of config.events) {
@@ -211,8 +210,6 @@ function makeLoader(config: {
               runOptions?: MockRunOptions,
             ): Promise<{ events: AsyncIterable<unknown> }> {
               config.onRun?.(prompt, runOptions);
-              if (config.throwFromStreamSetup)
-                throw config.throwFromStreamSetup;
               return {
                 events: {
                   [Symbol.asyncIterator]: () => eventStream(),
@@ -233,8 +230,6 @@ function makeLoader(config: {
               runOptions?: MockRunOptions,
             ): Promise<{ events: AsyncIterable<unknown> }> {
               config.onRun?.(prompt, runOptions);
-              if (config.throwFromStreamSetup)
-                throw config.throwFromStreamSetup;
               return {
                 events: {
                   [Symbol.asyncIterator]: () => eventStream(),
@@ -899,6 +894,10 @@ describe('CodexAdapter', () => {
 
   it.each([
     { name: 'missing', raw: undefined, reason: 'missing-usage' },
+    { name: 'null', raw: null, reason: 'missing-usage' },
+    { name: 'array', raw: [], reason: 'invalid-usage' },
+    { name: 'primitive', raw: 0, reason: 'invalid-usage' },
+    { name: 'missing required counters', raw: {}, reason: 'invalid-usage' },
     {
       name: 'malformed',
       raw: { input_tokens: 'private', output_tokens: 5 },
@@ -1003,6 +1002,15 @@ describe('CodexAdapter', () => {
       expect(events.at(-2)?.payload).toHaveProperty('snapshot');
       if (seed) expect(events.at(-2)?.payload).toHaveProperty('baseline');
       else expect(events.at(-2)?.payload).not.toHaveProperty('baseline');
+      if (reason === 'invalid-token-subsets') {
+        // The arithmetic is preserved as evidence even though cache reads
+        // exceed this turn's inclusive input and cannot form a token report.
+        expect(events.at(-2)?.payload).toHaveProperty('delta', {
+          inputTokens: 20,
+          outputTokens: 20,
+          cachedInputTokens: 30,
+        });
+      }
       expect(donePayload(events.at(-1)!).usage.tokens).toBeUndefined();
     },
   );
@@ -1013,8 +1021,9 @@ describe('CodexAdapter', () => {
     'iterator error',
     'consumer close',
     'stream setup error',
+    'empty stream result',
   ] as const)(
-    'invalidates an unobserved usage boundary after %s and recovers (native 0.151.0 fixture)',
+    'invalidates the boundary before a queued resume after %s and recovers (native 0.151.0 fixture)',
     async (exit) => {
       const fixture = JSON.parse(
         readFileSync(
@@ -1039,6 +1048,19 @@ describe('CodexAdapter', () => {
       expect(fixture.resumedLastRequest.output_tokens).toBe(5);
       expect(fixture.interruptedPersisted.output_tokens).toBe(120);
       const controller = new AbortController();
+      const setupFailure =
+        exit === 'stream setup error' || exit === 'empty stream result';
+      const gate = (): { promise: Promise<void>; resolve: () => void } => {
+        let resolve!: () => void;
+        const promise = new Promise<void>((release) => {
+          resolve = release;
+        });
+        return { promise, resolve };
+      };
+      const interruptionStarted = gate();
+      const interruptionMayFinish = gate();
+      const queuedConstructed = gate();
+      const startedPrompts: string[] = [];
       const following = {
         ...fixture.resumed,
         input_tokens: fixture.resumed.input_tokens + 10,
@@ -1053,27 +1075,59 @@ describe('CodexAdapter', () => {
           status: 'in_progress',
         },
       };
+      const interruptedThread: MockCodexThread = {
+        async runStreamed(prompt) {
+          startedPrompts.push(prompt);
+          interruptionStarted.resolve();
+          if (setupFailure) {
+            await interruptionMayFinish.promise;
+            if (exit === 'empty stream result') {
+              // Deliberately violate the SDK shape to exercise its empty-result
+              // guard after execution was requested.
+              return undefined as unknown as { events: AsyncIterable<unknown> };
+            }
+            throw new Error('stream setup failed');
+          }
+          return {
+            events: (async function* () {
+              try {
+                yield command;
+                await interruptionMayFinish.promise;
+                if (exit === 'abort') controller.abort();
+                if (exit === 'iterator error') {
+                  throw new Error('transport closed');
+                }
+              } finally {
+                // Consumer return also waits here, so every exit keeps the
+                // first invocation open until its successor is queued.
+                await interruptionMayFinish.promise;
+              }
+            })(),
+          };
+        },
+      };
       const loaders = [
         makeLoader({
           events: [
             { type: 'thread.started', thread_id: fixture.threadId },
             { type: 'turn.completed', usage: fixture.fresh },
           ],
+          onRun: (prompt) => startedPrompts.push(prompt),
         }),
-        makeLoader({
-          events: [command],
-          onEventConsumed: () => {
-            if (exit === 'abort') controller.abort();
+        async () => ({
+          Codex: class {
+            startThread(): MockCodexThread {
+              return interruptedThread;
+            }
+            resumeThread(): MockCodexThread {
+              return interruptedThread;
+            }
           },
-          ...(exit === 'iterator error'
-            ? { throwFromRun: new Error('transport closed') }
-            : {}),
-          ...(exit === 'stream setup error'
-            ? { throwFromStreamSetup: new Error('stream setup failed') }
-            : {}),
         }),
         makeLoader({
           events: [{ type: 'turn.completed', usage: fixture.resumed }],
+          onConstruct: () => queuedConstructed.resolve(),
+          onRun: (prompt) => startedPrompts.push(prompt),
         }),
         makeLoader({ events: [{ type: 'turn.completed', usage: following }] }),
       ];
@@ -1081,29 +1135,69 @@ describe('CodexAdapter', () => {
       const adapter = new CodexAdapter({
         loadSdk: () => loaders[invocation++]!(),
       });
+      const queueState = adapter as unknown as {
+        threadUsageBaselines: Map<string, unknown>;
+        acquireResumeSession(id: string): Promise<() => void>;
+      };
+      const acquire = queueState.acquireResumeSession.bind(adapter);
+      const baselinesAtRelease: boolean[] = [];
+      queueState.acquireResumeSession = async (id) => {
+        const release = await acquire(id);
+        return () => {
+          // Observe the actual release boundary without changing queue order.
+          baselinesAtRelease.push(queueState.threadUsageBaselines.has(id));
+          release();
+        };
+      };
       await collect(adapter.run('first'));
       const interrupted = adapter.run('interrupted', {
         resume: fixture.threadId,
         abortSignal: controller.signal,
       });
-      if (exit === 'stream setup error') {
-        await expect(collect(interrupted)).rejects.toThrow(
-          'stream setup failed',
-        );
-      } else if (exit === 'consumer close') {
+      let interruptedRun: Promise<AgentEvent[]>;
+      if (exit === 'consumer close') {
         expect((await interrupted.next()).value?.type).toBe('init');
         expect((await interrupted.next()).value?.type).toBe('tool_use');
-        await interrupted.return();
+        interruptedRun = interrupted.return().then(() => []);
       } else {
-        const events = await collect(interrupted);
+        interruptedRun = collect(interrupted);
+      }
+      const interruptedCompletion = setupFailure
+        ? expect(interruptedRun).rejects.toThrow(
+            exit === 'stream setup error'
+              ? 'stream setup failed'
+              : 'does not support runStreamed',
+          )
+        : interruptedRun;
+      await interruptionStarted.promise;
+      const resumedRun = collect(
+        adapter.run('resumed', { resume: fixture.threadId }),
+      );
+      try {
+        await queuedConstructed.promise;
+        // Construction occurs before queue acquisition. Its completion proves
+        // the next call reached the adapter, while runStreamed stays blocked.
+        expect(startedPrompts).toEqual(['first', 'interrupted']);
+      } finally {
+        interruptionMayFinish.resolve();
+      }
+      await interruptedCompletion;
+      expect(
+        baselinesAtRelease[0],
+        'baseline discarded before queue release',
+      ).toBe(false);
+      if (!setupFailure && exit !== 'consumer close') {
+        const events = await interruptedRun;
         expect(donePayload(events.at(-1)!).usage).toEqual({ toolUses: 1 });
+        expect(donePayload(events.at(-1)!).status).toBe(
+          exit === 'abort' ? 'interrupted' : 'error',
+        );
         expect(events.some((event) => event.type === 'codex:usage')).toBe(
           false,
         );
       }
-      const resumed = await collect(
-        adapter.run('resumed', { resume: fixture.threadId }),
-      );
+      const resumed = await resumedRun;
+      expect(startedPrompts).toEqual(['first', 'interrupted', 'resumed']);
       expect(resumed.at(-2)?.payload).toMatchObject({
         status: 'omitted',
         reason: 'missing-baseline',

@@ -16,17 +16,16 @@ export function isObject(value: unknown): value is Record<string, unknown> {
 
 /** The file to delete when the next estimate should retrieve current prices. */
 export function getDefaultPricingCachePath(): string {
-  const home = homedir();
   const root =
     process.platform === 'darwin'
-      ? join(home, 'Library', 'Caches')
+      ? join(homedir(), 'Library', 'Caches')
       : process.platform === 'win32'
         ? process.env.LOCALAPPDATA && isAbsolute(process.env.LOCALAPPDATA)
           ? process.env.LOCALAPPDATA
-          : join(home, 'AppData', 'Local')
+          : join(homedir(), 'AppData', 'Local')
         : process.env.XDG_CACHE_HOME && isAbsolute(process.env.XDG_CACHE_HOME)
           ? process.env.XDG_CACHE_HOME
-          : join(home, '.cache');
+          : join(homedir(), '.cache');
   return join(root, 'cligent', 'models-dev-v1.json');
 }
 
@@ -124,15 +123,16 @@ async function retrieve(timeoutMs: number): Promise<CacheEntry | undefined> {
 }
 
 async function saveCache(path: string, entry: CacheEntry): Promise<void> {
-  const temporary = `${path}.${randomUUID()}.tmp`;
+  let temporary: string | undefined;
   try {
+    temporary = `${path}.${randomUUID()}.tmp`;
     await mkdir(dirname(path), { recursive: true });
     await writeFile(temporary, JSON.stringify(entry), { mode: 0o600 });
     await rename(temporary, path);
   } catch {
     // A read-only cache location does not discard prices retrieved for this call.
   } finally {
-    await rm(temporary, { force: true }).catch(() => {});
+    if (temporary) await rm(temporary, { force: true }).catch(() => {});
   }
 }
 
@@ -141,10 +141,15 @@ async function saveCache(path: string, entry: CacheEntry): Promise<void> {
 const pending = new Map<string, Promise<CacheEntry | undefined>>();
 
 export async function loadPricingCatalog(
-  cachePath: string,
+  cachePath: string | undefined,
   timeoutMs: number,
 ): Promise<PricingCatalog | undefined> {
-  const path = resolve(cachePath);
+  let path: string;
+  try {
+    path = resolve(cachePath ?? getDefaultPricingCachePath());
+  } catch {
+    return undefined;
+  }
   const cached = await readCache(path);
   if (cached && Date.now() - cached.fetchedAt < TTL_MS) {
     return {
